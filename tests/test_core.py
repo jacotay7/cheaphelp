@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,7 @@ from cheaphelp._internal import opencode, planner, systemd, worker
 from cheaphelp._internal.config import DEFAULT_AGENT_TIMEOUT, DEFAULT_MODELS, Config, Workspace
 from cheaphelp._internal.env import parse_env, read_env_file, update_env_file
 from cheaphelp._internal.github import Comment, Issue
+from cheaphelp._internal.lock import RunLock
 from cheaphelp._internal.orchestrator import classify
 from cheaphelp._internal.registry import Registry, RepoEntry, parse_slug
 from cheaphelp._internal.responder import (
@@ -477,3 +479,37 @@ def test_classify_stages() -> None:
     assert classify(_issue_with([lab["needs_human"]]), [], bot, cfg) is None
     # In-progress with a terminal label still resolves to None.
     assert classify(_issue_with([lab["in_progress"], lab["in_review"]]), [], bot, cfg) is None
+
+
+# --- workspace lock --------------------------------------------------------
+def test_workspace_run_lock_path(tmp_path: Path) -> None:
+    assert Workspace(tmp_path).run_lock_path == tmp_path / "run.lock"
+
+
+def test_run_lock_acquires_on_fresh_path(tmp_path: Path) -> None:
+    path = tmp_path / "x.lock"
+    with RunLock(path) as lock:
+        assert lock.acquired is True
+        assert path.exists()
+        assert lock.holder_pid == os.getpid()
+
+
+def test_run_lock_reports_contention(tmp_path: Path) -> None:
+    path = tmp_path / "x.lock"
+    with RunLock(path) as first:
+        assert first.acquired is True
+        with RunLock(path) as second:
+            assert second.acquired is False
+
+
+def test_run_lock_releases_on_exit(tmp_path: Path) -> None:
+    path = tmp_path / "x.lock"
+    with RunLock(path) as first:
+        assert first.acquired is True
+    with RunLock(path) as second:
+        assert second.acquired is True
+
+
+def test_run_lock_holder_pid(tmp_path: Path) -> None:
+    with RunLock(tmp_path / "x.lock") as lock:
+        assert lock.holder_pid == os.getpid()
