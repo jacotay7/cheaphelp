@@ -110,9 +110,13 @@ class Registry:
 
         Only fields that exist on ``RepoEntry`` and are explicitly set to a
         non-``None`` value are applied. Unknown kwargs are ignored. Returns
-        ``False`` if the repo is not registered. The file is rewritten only
-        when at least one field actually changes; otherwise the call is a
-        no-op on disk.
+        ``True`` only when the repo is registered and at least one supplied
+        field actually changes (in which case the file is rewritten).
+        Returns ``False`` when the repo is not registered, or when the repo
+        is registered but every supplied field already matches its current
+        value on disk (in which case the file is not rewritten). Callers
+        that need to distinguish "not found" from "no change" should use
+        ``find()`` first to check existence.
         """
         repos = self.load()
         target: RepoEntry | None = None
@@ -133,4 +137,4 @@ class Registry:
                 changed = True
         if changed:
             self.save(repos)
-        return True
+        return changed
