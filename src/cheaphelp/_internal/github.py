@@ -228,3 +228,22 @@ class GitHubClient:
             f"/repos/{owner}/{repo}/pulls",
             json={"title": title, "head": head, "base": base, "body": body, "draft": draft},
         )
+
+    def request_reviewers(self, owner: str, repo: str, number: int, reviewers: list[str]) -> bool:
+        """Request reviewers on a PR. Returns False if GitHub rejected the request.
+
+        GitHub refuses to request a review from the PR's own author (a common case
+        here, since the bot may be the repo owner); that is treated as a soft
+        failure so the caller can fall back to an @mention.
+        """
+        if not reviewers:
+            return False
+        try:
+            self._request(
+                "POST",
+                f"/repos/{owner}/{repo}/pulls/{number}/requested_reviewers",
+                json={"reviewers": reviewers},
+            )
+        except GitHubError:
+            return False
+        return True

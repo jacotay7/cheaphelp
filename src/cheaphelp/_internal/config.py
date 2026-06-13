@@ -98,6 +98,9 @@ class Config:
     variants: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_VARIANTS))
     labels: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_LABELS))
     sandbox: dict[str, bool] = field(default_factory=lambda: dict(DEFAULT_SANDBOX))
+    # GitHub usernames to request as reviewers on opened PRs. Empty = default to
+    # the repository owner.
+    pr_reviewers: list[str] = field(default_factory=list)
     poll_interval: str = DEFAULT_POLL_INTERVAL
     opencode_bin: str = "opencode"
 
@@ -110,6 +113,7 @@ class Config:
             variants={**DEFAULT_VARIANTS, **(data.get("variants") or {})},
             labels={**DEFAULT_LABELS, **(data.get("labels") or {})},
             sandbox={**DEFAULT_SANDBOX, **(data.get("sandbox") or {})},
+            pr_reviewers=list(data.get("pr_reviewers") or []),
             poll_interval=str(data.get("poll_interval", DEFAULT_POLL_INTERVAL)),
             opencode_bin=str(data.get("opencode_bin", "opencode")),
         )
@@ -122,6 +126,7 @@ class Config:
             "variants": self.variants,
             "labels": self.labels,
             "sandbox": self.sandbox,
+            "pr_reviewers": self.pr_reviewers,
             "poll_interval": self.poll_interval,
             "opencode_bin": self.opencode_bin,
         }

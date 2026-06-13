@@ -77,9 +77,20 @@ def test_registry_add_remove_toggle(tmp_path: Path) -> None:
     assert reg.add(RepoEntry(owner="o", name="r")) is True
     assert reg.add(RepoEntry(owner="o", name="r")) is False  # duplicate
     assert reg.set_enabled("o", "r", enabled=False) is True
-    assert reg.find("o", "r").enabled is False
+    found = reg.find("o", "r")
+    assert found is not None
+    assert found.enabled is False
     assert reg.remove("o", "r") is True
     assert reg.remove("o", "r") is False
+
+
+def test_registry_checks_roundtrip(tmp_path: Path) -> None:
+    reg = Registry(tmp_path / "repos.json")
+    assert RepoEntry(owner="o", name="r").checks == ""  # default: gate disabled
+    reg.add(RepoEntry(owner="o", name="r", checks="ruff check . && pytest"))
+    found = reg.find("o", "r")
+    assert found is not None
+    assert found.checks == "ruff check . && pytest"
 
 
 # --- responder -------------------------------------------------------------
@@ -126,7 +137,9 @@ def test_extract_decision_from_messy_output() -> None:
 
 def test_extract_decision_prefers_last_block() -> None:
     out = '```json\n{"action": "comment"}\n```\n```json\n{"action": "finalize"}\n```'
-    assert opencode.extract_decision(out)["action"] == "finalize"
+    decision = opencode.extract_decision(out)
+    assert decision is not None
+    assert decision["action"] == "finalize"
 
 
 def test_extract_decision_none_when_absent() -> None:
@@ -234,11 +247,15 @@ def test_task_store_lifecycle(tmp_path: Path) -> None:
     assert (tmp_path / "issue-1" / "tasks" / "t1.task.md").exists()
 
     # Only t1 is ready (t2 depends on it).
-    assert store.next_ready().id == "t1"
+    ready = store.next_ready()
+    assert ready is not None
+    assert ready.id == "t1"
     assert not store.all_done()
 
     store.set_status("t1", DONE, summary="did one")
-    assert store.next_ready().id == "t2"
+    ready = store.next_ready()
+    assert ready is not None
+    assert ready.id == "t2"
     store.set_status("t2", DONE)
     assert store.all_done()
     assert store.next_ready() is None

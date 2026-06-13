@@ -13,7 +13,9 @@ def load_prompt(role: str) -> str:
     """Return the bundled prompt text for an agent role."""
     if role not in AGENT_ROLES:
         raise KeyError(f"Unknown agent role: {role!r}")
-    return resources.files(__package__).joinpath(f"{role}.md").read_text(encoding="utf-8")
+    # Use __name__ (always a str for this package's __init__) rather than
+    # __package__ (typed str | None) so the type checker is satisfied.
+    return resources.files(__name__).joinpath(f"{role}.md").read_text(encoding="utf-8")
 
 
 def load_all_prompts() -> dict[str, str]:

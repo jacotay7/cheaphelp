@@ -30,8 +30,18 @@ the right agent:
 (no label) + human spoke last     -> responder   refine scope -> issues.md, label ready
 cheaphelp:ready / :needs-replan    -> planner     issues.md -> tasks,        label planned
 cheaphelp:planned, tasks pending   -> worker      implement a task on the issue branch
-cheaphelp:planned, all tasks done  -> reviewer    open PR (label in-review) or replan
+cheaphelp:planned, all tasks done  -> quality gate -> reviewer  open PR or replan
 ```
+
+### Quality gate
+
+Before the reviewer can open a PR, the orchestrator runs the repository's
+**check command** (`checks` in the registry — set it with
+`cheaphelp repo add <slug> --checks "…"`) inside the work clone. A **failing
+gate never becomes a PR**: the failure is written to the issue's `replan.md`, the
+issue is relabeled `needs-replan`, and the planner produces a minimal corrective
+plan. This is the deterministic backstop so lint/test failures can't slip into a
+pull request even if an agent misses them. Leave `checks` empty to disable.
 
 ## Why opencode + OpenRouter
 

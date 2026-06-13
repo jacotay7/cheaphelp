@@ -114,6 +114,24 @@ def push_branch(clone_dir: Path, repo: RepoEntry, *, branch: str, token: str | N
     _run(["push", url, f"HEAD:refs/heads/{branch}"], cwd=clone_dir)
 
 
+def run_command(clone_dir: Path, command: str, *, timeout: float = 900.0) -> tuple[int, str]:
+    """Run a shell `command` in the clone; return (returncode, combined output).
+
+    Used for the quality gate. The command comes from trusted repo config, not
+    from an agent.
+    """
+    proc = subprocess.run(  # noqa: S602 - command is operator-configured, not agent input
+        command,
+        cwd=str(clone_dir),
+        shell=True,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
+    return proc.returncode, (proc.stdout + proc.stderr)
+
+
 def diff_against_base(clone_dir: Path, repo: RepoEntry) -> tuple[str, str]:
     """Return (name-status, full unified diff) of the branch vs the base branch."""
     base = repo.default_branch or "main"

@@ -13,7 +13,11 @@ more, no less. Other tasks for this issue are handled separately; stay in scope.
    existing helpers; match the surrounding style.
 3. Make the change using your editing tools.
 4. **Verify it.** Run the task's verification step (and any obviously-relevant
-   tests). If something fails, fix it. Use your shell tools as needed.
+   tests). **Also run the project's linter/formatter** (e.g. `ruff check` /
+   `ruff format`, or whatever the repo uses) on the files you touched and fix any
+   issues — unused imports, style, etc. The change will be rejected by an
+   automated quality gate if it does not lint cleanly, so do not leave warnings.
+   If something fails, fix it. Use your shell tools as needed.
 5. Do not commit, push, or touch git — the system handles version control for
    you. Just leave the working tree with your changes applied.
 
