@@ -61,9 +61,13 @@ def get_parser() -> argparse.ArgumentParser:
     p_add = repo_sub.add_parser("add", help="Register a repository (owner/name).")
     p_add.add_argument("slug", help="Repository as owner/name or a GitHub URL.")
     p_add.set_defaults(func=commands.cmd_repo_add)
-    repo_sub.add_parser("list", help="List registered repositories.").set_defaults(
-        func=commands.cmd_repo_list,
+    p_list = repo_sub.add_parser("list", help="List registered repositories.")
+    p_list.add_argument(
+        "--json",
+        action="store_true",
+        help="Output the repository list as a JSON array.",
     )
+    p_list.set_defaults(func=commands.cmd_repo_list)
     p_rm = repo_sub.add_parser("remove", help="Unregister a repository.")
     p_rm.add_argument("slug")
     p_rm.set_defaults(func=commands.cmd_repo_remove)
