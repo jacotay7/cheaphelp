@@ -11,7 +11,6 @@ import contextlib
 import fcntl
 import os
 from pathlib import Path
-from typing import Self
 
 
 class RunLock:
@@ -27,7 +26,9 @@ class RunLock:
         self.fd: int | None = None
         self.acquired: bool = False
 
-    def __enter__(self) -> Self:
+    # Return the concrete class (not `typing.Self`, which is 3.11+) so the module
+    # imports on the project's py310 minimum.
+    def __enter__(self) -> RunLock:
         try:
             self.fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o644)
         except OSError:
