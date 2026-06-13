@@ -25,7 +25,7 @@ from cheaphelp._internal.env import (
     update_env_file,
 )
 from cheaphelp._internal.github import GitHubClient, GitHubError
-from cheaphelp._internal.orchestrator import tick
+from cheaphelp._internal.orchestrator import classify, tick
 from cheaphelp._internal.registry import Registry, RepoEntry, parse_slug
 
 
@@ -329,6 +329,54 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         print(f"  {role:<9} {model}")
 
     return 0 if ok else 1
+
+
+# --- status ----------------------------------------------------------------
+def cmd_status(args: argparse.Namespace) -> int:
+    ws = _workspace(args)
+    if (rc := _require_workspace(ws)) is not None:
+        return rc
+
+    load_into_environ(ws.env_path)
+    token = os.environ.get(GITHUB_TOKEN_KEY, "")
+    if not token:
+        print(f"{GITHUB_TOKEN_KEY} not set; add it to {ws.env_path}", file=sys.stderr)
+        return 1
+
+    config = ws.load_config()
+    repos = [r for r in Registry(ws.registry_path).load() if r.enabled]
+    if not repos:
+        print("No enabled repositories registered. Add one with `cheaphelp repo add owner/name`.")
+        return 0
+
+    title_width = 60
+    try:
+        with GitHubClient(token) as gh:
+            bot_login = gh.authenticated_login()
+            for repo in repos:
+                print(repo.slug)
+                try:
+                    issues = gh.list_open_issues(repo.owner, repo.name)
+                except GitHubError as exc:
+                    print(f"  ! failed to list issues: {exc}", file=sys.stderr)
+                    continue
+                if not issues:
+                    print("  (no open issues)")
+                    continue
+                for issue in issues:
+                    try:
+                        comments = gh.list_issue_comments(repo.owner, repo.name, issue.number)
+                    except GitHubError as exc:
+                        print(f"  ! failed to list comments for #{issue.number}: {exc}", file=sys.stderr)
+                        comments = []
+                    stage = classify(issue, comments, bot_login, config)
+                    label = stage or "-"
+                    title = issue.title[: title_width - 1] + "\u2026" if len(issue.title) > title_width else issue.title
+                    print(f"  #{issue.number:<6} {title:<{title_width}}  {label}")
+    except GitHubError as exc:
+        print(f"GitHub API error: {exc}", file=sys.stderr)
+        return 1
+    return 0
 
 
 def add_config_overrides(config: Config) -> None:  # pragma: no cover - reserved
