@@ -99,9 +99,13 @@ def commit_all(clone_dir: Path, *, message: str) -> bool:
         return False
     _run(
         [
-            "-c", f"user.name={COMMIT_AUTHOR_NAME}",
-            "-c", f"user.email={COMMIT_AUTHOR_EMAIL}",
-            "commit", "-m", message,
+            "-c",
+            f"user.name={COMMIT_AUTHOR_NAME}",
+            "-c",
+            f"user.email={COMMIT_AUTHOR_EMAIL}",
+            "commit",
+            "-m",
+            message,
         ],
         cwd=clone_dir,
     )

@@ -151,13 +151,21 @@ def _quality_gate(gh, workspace, config, repo, number, work_dir, log, report) ->
         f"Output (tail):\n\n```\n{tail}\n```\n",
         encoding="utf-8",
     )
-    gh.ensure_label(repo.owner, repo.name, config.labels["needs_replan"], color="fbca04",
-                    description="cheaphelp: reviewer sent back to planner")
+    gh.ensure_label(
+        repo.owner,
+        repo.name,
+        config.labels["needs_replan"],
+        color="fbca04",
+        description="cheaphelp: reviewer sent back to planner",
+    )
     gh.add_labels(repo.owner, repo.name, number, [config.labels["needs_replan"]])
     gh.remove_label(repo.owner, repo.name, number, config.labels["planned"])
-    gh.create_comment(repo.owner, repo.name, number,
-                      f"{responder.BOT_MARKER}\n\nQuality checks failed; sending back to planning.\n\n"
-                      f"```\n{tail[-1500:]}\n```")
+    gh.create_comment(
+        repo.owner,
+        repo.name,
+        number,
+        f"{responder.BOT_MARKER}\n\nQuality checks failed; sending back to planning.\n\n```\n{tail[-1500:]}\n```",
+    )
     log(f"  ! {repo.slug}#{number}: quality gate FAILED -> needs-replan")
     report.actions.append(f"#{number}: quality gate failed")
     return False
@@ -209,8 +217,13 @@ def _run_build(gh, workspace, config, repo, issue, token, log, report) -> None: 
         log(f"  > {repo.slug}#{number}: reviewer {rr.decision} ({detail})")
         report.actions.append(f"#{number}: reviewer {rr.decision}")
     elif store.is_blocked(tasks):
-        gh.ensure_label(repo.owner, repo.name, config.labels["needs_human"], color="d93f0b",
-                        description="cheaphelp: stuck; needs a human")
+        gh.ensure_label(
+            repo.owner,
+            repo.name,
+            config.labels["needs_human"],
+            color="d93f0b",
+            description="cheaphelp: stuck; needs a human",
+        )
         gh.add_labels(repo.owner, repo.name, number, [config.labels["needs_human"]])
         log(f"  ! {repo.slug}#{number}: blocked; labeled needs-human")
         report.actions.append(f"#{number}: blocked")
@@ -309,8 +322,14 @@ def tick(workspace: Workspace, *, dry_run: bool = False, log: Logger | None = No
             for repo in repos:
                 report.repos.append(
                     _process_repo(
-                        gh, workspace, config, repo, report.bot_login, token,
-                        dry_run=dry_run, log=log,
+                        gh,
+                        workspace,
+                        config,
+                        repo,
+                        report.bot_login,
+                        token,
+                        dry_run=dry_run,
+                        log=log,
                     ),
                 )
     except Exception as exc:  # noqa: BLE001 - top-level guard for the tick

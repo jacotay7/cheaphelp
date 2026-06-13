@@ -73,9 +73,13 @@ def get_parser() -> argparse.ArgumentParser:
         'issues (e.g. "ruff check --fix . ; ruff format ."). Changes are committed.',
     )
     p_add.set_defaults(func=commands.cmd_repo_add)
-    repo_sub.add_parser("list", help="List registered repositories.").set_defaults(
-        func=commands.cmd_repo_list,
+    p_list = repo_sub.add_parser("list", help="List registered repositories.")
+    p_list.add_argument(
+        "--json",
+        action="store_true",
+        help="Output the list of registered repositories as a JSON array.",
     )
+    p_list.set_defaults(func=commands.cmd_repo_list)
     p_rm = repo_sub.add_parser("remove", help="Unregister a repository.")
     p_rm.add_argument("slug")
     p_rm.set_defaults(func=commands.cmd_repo_remove)

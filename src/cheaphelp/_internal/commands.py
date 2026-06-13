@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import json
 import os
 import sys
+from dataclasses import asdict
 from pathlib import Path
 
 from cheaphelp._internal import opencode, systemd
@@ -141,6 +143,16 @@ def cmd_repo_list(args: argparse.Namespace) -> int:
     if (rc := _require_workspace(ws)) is not None:
         return rc
     repos = Registry(ws.registry_path).load()
+    if getattr(args, "json", False):
+        payload = [
+            {
+                **asdict(repo),
+                "slug": repo.slug,
+            }
+            for repo in repos
+        ]
+        print(json.dumps(payload, indent=2))
+        return 0
     if not repos:
         print("No repositories registered. Add one with `cheaphelp repo add owner/name`.")
         return 0
