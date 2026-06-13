@@ -128,7 +128,6 @@ def test_run_writes_daily_log_file(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """`cheaphelp run` writes a per-day log file mirroring every console line."""
-
     ws = _setup_workspace(tmp_path)
 
     def fake_tick(workspace: Workspace, *, dry_run: bool, log) -> SimpleNamespace:  # noqa: ARG001
@@ -156,7 +155,7 @@ def test_run_writes_daily_log_file(
     # First line is a timestamped header in the expected format.
     assert lines, "log file should not be empty"
     header_re = re.compile(
-        r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] --- tick start ---\s*$"
+        r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] --- tick start ---\s*$",
     )
     assert header_re.match(lines[0]), f"unexpected header line: {lines[0]!r}"
 
@@ -177,7 +176,6 @@ def test_run_appends_within_same_day(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Running twice on the same day appends a second header + body to the daily log file."""
-
     ws = _setup_workspace(tmp_path)
 
     def fake_tick(workspace: Workspace, *, dry_run: bool, log) -> SimpleNamespace:  # noqa: ARG001
@@ -198,9 +196,7 @@ def test_run_appends_within_same_day(
     assert rc2 == 0
 
     second_size = log_path.stat().st_size
-    assert second_size > first_size, (
-        "log file should grow when run again on the same day"
-    )
+    assert second_size > first_size, "log file should grow when run again on the same day"
 
     contents = log_path.read_text(encoding="utf-8")
     assert contents.count("--- tick start ---") == 2
@@ -213,7 +209,6 @@ def test_run_swallows_log_write_errors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A log file that can't be written (e.g. path blocked by a directory) must not crash the tick."""
-
     ws = _setup_workspace(tmp_path)
     blocker = ws.logs_dir / f"run-{datetime.date.today().isoformat()}.log"
     blocker.mkdir()  # opening this path for writing raises IsADirectoryError (an OSError)
