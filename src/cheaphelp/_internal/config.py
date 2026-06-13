@@ -54,6 +54,8 @@ RESPONDER_DONE_LABEL_KEYS = (
 )
 
 DEFAULT_POLL_INTERVAL = "10m"
+DEFAULT_AGENT_TIMEOUT = 600.0
+"""Default per-agent subprocess timeout (seconds) for `opencode.run_agent`."""
 
 # Per-role opencode model "variant" (provider-specific reasoning effort, passed
 # as `--variant`). Empty string = the provider's default. `deepseek-v4-flash`
@@ -103,6 +105,7 @@ class Config:
     pr_reviewers: list[str] = field(default_factory=list)
     poll_interval: str = DEFAULT_POLL_INTERVAL
     opencode_bin: str = "opencode"
+    agent_timeout: float = DEFAULT_AGENT_TIMEOUT
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Config:
@@ -116,6 +119,7 @@ class Config:
             pr_reviewers=list(data.get("pr_reviewers") or []),
             poll_interval=str(data.get("poll_interval", DEFAULT_POLL_INTERVAL)),
             opencode_bin=str(data.get("opencode_bin", "opencode")),
+            agent_timeout=float(data.get("agent_timeout", DEFAULT_AGENT_TIMEOUT)),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -129,6 +133,7 @@ class Config:
             "pr_reviewers": self.pr_reviewers,
             "poll_interval": self.poll_interval,
             "opencode_bin": self.opencode_bin,
+            "agent_timeout": self.agent_timeout,
         }
 
     def model_for(self, role: str) -> str:

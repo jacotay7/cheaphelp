@@ -98,7 +98,7 @@ def run_task(
 
     store.set_status(task.id, "in_progress")
     prompt = build_prompt(task, issue_md, autofix=repo.autofix, checks=repo.checks)
-    result = opencode.run_agent(workspace, config, "worker", prompt, cwd=clone_dir)
+    result = opencode.run_agent(workspace, config, "worker", prompt, cwd=clone_dir, timeout=config.agent_timeout)
 
     decision = result.decision or {}
     status = str(decision.get("status", "")).strip().lower()

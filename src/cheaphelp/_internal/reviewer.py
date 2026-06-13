@@ -181,7 +181,7 @@ def review_issue(
     name_status, full_diff = gitutil.diff_against_base(clone_dir, repo)
     prompt = build_prompt(issue_md, name_status, full_diff, _collect_summaries(store))
 
-    result = opencode.run_agent(workspace, config, "reviewer", prompt, cwd=clone_dir)
+    result = opencode.run_agent(workspace, config, "reviewer", prompt, cwd=clone_dir, timeout=config.agent_timeout)
     if result.decision is None:
         return ReviewResult(number=number, decision="none", error="unparseable")
     return apply_review(gh, workspace, config, repo, number, result.decision, clone_dir, token=token)
