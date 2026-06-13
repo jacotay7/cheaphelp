@@ -22,26 +22,53 @@ def branch_name(number: int) -> str:
     return f"cheaphelp/issue-{number}"
 
 
-def build_prompt(task: Task, issue_md: str) -> str:
-    """Render the worker's user message for a single task."""
-    return "\n".join(
-        [
-            "You are implementing ONE task that is part of a larger issue.",
+def build_prompt(task: Task, issue_md: str, *, autofix: str = "", checks: str = "") -> str:
+    """Render the worker's user message for a single task.
+
+    When the repo configures quality-gate commands (`autofix`/`checks`), they are
+    handed to the worker verbatim so it can run the *exact* gate locally and fix
+    failures before reporting `done` — rather than discovering them only after an
+    automated gate failure forces an expensive re-plan.
+    """
+    lines = [
+        "You are implementing ONE task that is part of a larger issue.",
+        "",
+        "## Issue context (for background only — do not implement the whole issue)",
+        "",
+        issue_md.strip() or "_(no spec)_",
+        "",
+        "## Your task",
+        "",
+        task.to_markdown(),
+    ]
+    if autofix or checks:
+        lines += [
             "",
-            "## Issue context (for background only — do not implement the whole issue)",
+            "## Quality gate — your change MUST pass this before it can be reviewed",
             "",
-            issue_md.strip() or "_(no spec)_",
+            "After implementing, run these exact command(s) in the working directory "
+            "and fix what they report about your change. **Do not report `done` until "
+            "the checks command exits clean.**",
             "",
-            "## Your task",
+        ]
+        if autofix:
+            lines.append(f"- Auto-fix (run first, fixes formatting/import order/lint): `{autofix}`")
+        if checks:
+            lines.append(f"- Checks (the gate — must pass with zero warnings): `{checks}`")
+        lines += [
             "",
-            task.to_markdown(),
-            "",
-            "---",
-            "",
-            "Implement this task in the working directory, verify it, then report "
-            "following your output protocol (a single json block).",
-        ],
-    )
+            "Lint must be clean. If a *test* fails only because a sibling task in this "
+            "issue isn't implemented yet, say so in your summary instead of forcing it "
+            "green — but never leave lint warnings behind.",
+        ]
+    lines += [
+        "",
+        "---",
+        "",
+        "Implement this task in the working directory, verify it, then report "
+        "following your output protocol (a single json block).",
+    ]
+    return "\n".join(lines)
 
 
 @dataclass
@@ -70,7 +97,7 @@ def run_task(
     issue_md = issue_md_path.read_text(encoding="utf-8") if issue_md_path.exists() else ""
 
     store.set_status(task.id, "in_progress")
-    prompt = build_prompt(task, issue_md)
+    prompt = build_prompt(task, issue_md, autofix=repo.autofix, checks=repo.checks)
     result = opencode.run_agent(workspace, config, "worker", prompt, cwd=clone_dir)
 
     decision = result.decision or {}

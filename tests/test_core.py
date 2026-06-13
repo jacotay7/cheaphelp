@@ -312,6 +312,25 @@ def test_worker_branch_name() -> None:
     assert worker.branch_name(42) == "cheaphelp/issue-42"
 
 
+def test_worker_build_prompt_includes_gate_commands() -> None:
+    task = worker.Task(id="t1", title="Do the thing")
+    prompt = worker.build_prompt(
+        task,
+        "spec",
+        autofix="ruff check --fix .",
+        checks="ruff check . && pytest -q",
+    )
+    assert "Quality gate" in prompt
+    assert "ruff check --fix ." in prompt
+    assert "ruff check . && pytest -q" in prompt
+    assert "Do not report `done`" in prompt
+
+
+def test_worker_build_prompt_omits_gate_when_unset() -> None:
+    prompt = worker.build_prompt(worker.Task(id="t1", title="Do the thing"), "spec")
+    assert "Quality gate" not in prompt
+
+
 # --- orchestrator stage classification ------------------------------------
 def _issue_with(labels: list[str]) -> Issue:
     return Issue(number=1, title="t", body="b", state="open", labels=labels, user="u", html_url="")
