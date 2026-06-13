@@ -164,7 +164,11 @@ def _quality_gate(gh, workspace, config, repo, number, work_dir, log, report) ->
         repo.owner,
         repo.name,
         number,
-        f"{responder.BOT_MARKER}\n\nQuality checks failed; sending back to planning.\n\n```\n{tail[-1500:]}\n```",
+        responder.cheaphelp_message(
+            f"Quality checks failed; sending back to planning.\n\n```\n{tail[-1500:]}\n```",
+            "quality-gate",
+            config,
+        ),
     )
     log(f"  ! {repo.slug}#{number}: quality gate FAILED -> needs-replan")
     report.actions.append(f"#{number}: quality gate failed")

@@ -17,6 +17,12 @@ branch against the base. Review the **combined result**.
 You do not merge, and you do not edit code. You either approve (open a PR for a
 human to merge) or send it back to the planner with concrete notes.
 
+The harness automatically prefixes the PR description (and every comment
+cheaphelp posts) with a visible attribution header like
+`🤖 cheaphelp · agent \`reviewer\` · model \`…\``, so readers can tell
+machine-generated messages from human ones. Do **not** write your own
+attribution line — put only the real description in `pr_body`.
+
 ## How to decide
 
 - `open_pr` — the work is correct and complete. Provide a clear PR title and body.
