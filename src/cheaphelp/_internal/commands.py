@@ -236,7 +236,10 @@ def cmd_run(args: argparse.Namespace) -> int:
             pass  # don't crash the tick for a log write failure
 
     log(header)
-    report = tick(ws, dry_run=args.dry_run, log=log)
+    config = ws.load_config()
+    cli_max = getattr(args, "max_issues", 0) or 0
+    effective_max = cli_max if cli_max > 0 else config.max_issues_per_tick
+    report = tick(ws, dry_run=args.dry_run, log=log, max_issues=effective_max)
     if report.error:
         print(f"\nError: {report.error}", file=sys.stderr)
         return 1

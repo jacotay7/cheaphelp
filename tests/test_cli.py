@@ -381,7 +381,13 @@ def test_run_writes_daily_log_file(
     """`cheaphelp run` writes a per-day log file mirroring every console line."""
     ws = _setup_workspace(tmp_path)
 
-    def fake_tick(workspace: Workspace, *, dry_run: bool, log: Callable[[str], None]) -> SimpleNamespace:  # noqa: ARG001
+    def fake_tick(
+        workspace: Workspace,  # noqa: ARG001
+        *,
+        dry_run: bool,  # noqa: ARG001
+        log: Callable[[str], None],
+        max_issues: int = 0,  # noqa: ARG001
+    ) -> SimpleNamespace:
         log("hello-from-stub")
         log("second line")
         return SimpleNamespace(error=None, total_turns=0, repos=[])
@@ -429,7 +435,13 @@ def test_run_appends_within_same_day(
     """Running twice on the same day appends a second header + body to the daily log file."""
     ws = _setup_workspace(tmp_path)
 
-    def fake_tick(workspace: Workspace, *, dry_run: bool, log: Callable[[str], None]) -> SimpleNamespace:  # noqa: ARG001
+    def fake_tick(
+        workspace: Workspace,  # noqa: ARG001
+        *,
+        dry_run: bool,  # noqa: ARG001
+        log: Callable[[str], None],
+        max_issues: int = 0,  # noqa: ARG001
+    ) -> SimpleNamespace:
         log("hello-from-stub")
         return SimpleNamespace(error=None, total_turns=0, repos=[])
 
@@ -465,7 +477,13 @@ def test_run_swallows_log_write_errors(
     blocker.mkdir()  # opening this path for writing raises IsADirectoryError (an OSError)
     try:
 
-        def fake_tick(workspace: Workspace, *, dry_run: bool, log: Callable[[str], None]) -> SimpleNamespace:  # noqa: ARG001
+        def fake_tick(
+            workspace: Workspace,  # noqa: ARG001
+            *,
+            dry_run: bool,  # noqa: ARG001
+            log: Callable[[str], None],
+            max_issues: int = 0,  # noqa: ARG001
+        ) -> SimpleNamespace:
             log("would-be-logged")
             return SimpleNamespace(error=None, total_turns=0, repos=[])
 

@@ -114,6 +114,14 @@ def get_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Report what would happen without acting.",
     )
+    p_run.add_argument(
+        "--max-issues",
+        type=int,
+        default=0,
+        metavar="N",
+        help="Cap the number of issues processed per repo in this tick (0 = unlimited, default 0). "
+        "Overrides max_issues_per_tick from config.json when > 0.",
+    )
     p_run.set_defaults(func=commands.cmd_run)
 
     # systemd
