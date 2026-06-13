@@ -29,25 +29,38 @@ from cheaphelp._internal.tasks import TaskStore
 
 Logger = Callable[[str], None]
 
+# Stages that the orchestrator will actually dispatch to an agent. Other
+# classify() return values are terminal / waiting / idle and are skipped.
+_ACTIONABLE_STAGES = frozenset({"responder", "planner", "build"})
+
 
 def _is_mock() -> bool:
     return bool(os.environ.get("CHEAPHELP_AGENT_MOCK"))
 
 
-def classify(issue: Issue, comments: list, bot_login: str, config: Config) -> str | None:
-    """Return the pipeline stage for an issue, or None if there's nothing to do."""
+def classify(issue: Issue, comments: list, bot_login: str, config: Config) -> str:
+    """Return the pipeline stage for an issue.
+
+    Always returns a string; actionable stages are ``"responder"``, ``"planner"``,
+    ``"build"``; waiting/terminal stages are ``"rejected"``, ``"in-review"``,
+    ``"needs-human"``; the no-op case is ``"idle"``.
+    """
     labels = set(issue.labels)
     lab = config.labels
-    # Terminal / waiting-on-human states: leave alone.
-    if labels & {lab["rejected"], lab["in_review"], lab["needs_human"]}:
-        return None
+    # Terminal / waiting-on-human states: leave alone, in precedence order.
+    if lab["rejected"] in labels:
+        return "rejected"
+    if lab["in_review"] in labels:
+        return "in-review"
+    if lab["needs_human"] in labels:
+        return "needs-human"
     if lab["planned"] in labels or lab["in_progress"] in labels:
         return "build"  # worker or reviewer, decided by task state
     if labels & {lab["ready"], lab["needs_replan"]}:
         return "planner"
     if responder.needs_turn(issue, comments, bot_login, config):
         return "responder"
-    return None
+    return "idle"
 
 
 @dataclass
@@ -269,7 +282,7 @@ def _process_repo(
     for issue in issues:
         comments = gh.list_issue_comments(repo.owner, repo.name, issue.number)
         stage = classify(issue, comments, bot_login, config)
-        if stage:
+        if stage in _ACTIONABLE_STAGES:
             work.append((stage, issue, comments))
     report.issues_considered = len(work)
 
