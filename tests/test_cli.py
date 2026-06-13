@@ -381,7 +381,13 @@ def test_run_writes_daily_log_file(
     """`cheaphelp run` writes a per-day log file mirroring every console line."""
     ws = _setup_workspace(tmp_path)
 
-    def fake_tick(workspace: Workspace, *, dry_run: bool, log: Callable[[str], None]) -> SimpleNamespace:  # noqa: ARG001
+    def fake_tick(
+        workspace: Workspace,
+        *,
+        dry_run: bool,
+        log: Callable[[str], None],
+        max_issues: int = 0,
+    ) -> SimpleNamespace:
         log("hello-from-stub")
         log("second line")
         return SimpleNamespace(error=None, total_turns=0, repos=[])
@@ -421,6 +427,45 @@ def test_run_writes_daily_log_file(
             assert line in captured, f"file line not echoed to stdout: {line!r}"
 
 
+def test_run_passes_max_issues_flag_to_tick(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`--max-issues` (CLI) overrides `max_issues_per_tick` (config) when > 0."""
+    ws = _setup_workspace(tmp_path)
+
+    captured: dict[str, object] = {}
+
+    def fake_tick(
+        workspace: Workspace,
+        *,
+        dry_run: bool,
+        log: Callable[[str], None],
+        max_issues: int = 0,
+    ) -> SimpleNamespace:
+        captured["max_issues"] = max_issues
+        return SimpleNamespace(error=None, total_turns=0, repos=[])
+
+    monkeypatch.setattr(commands, "tick", fake_tick)
+
+    # CLI flag is forwarded.
+    assert main(["--home", str(ws.home), "run", "--max-issues", "2"]) == 0
+    assert captured["max_issues"] == 2
+
+    # No flag and no config => unlimited (0).
+    assert main(["--home", str(ws.home), "run"]) == 0
+    assert captured["max_issues"] == 0
+
+    # Config value is honoured when no flag is given.
+    ws.save_config(Config.from_dict({"max_issues_per_tick": 4}))
+    assert main(["--home", str(ws.home), "run"]) == 0
+    assert captured["max_issues"] == 4
+
+    # CLI flag (> 0) overrides the config value.
+    assert main(["--home", str(ws.home), "run", "--max-issues", "1"]) == 0
+    assert captured["max_issues"] == 1
+
+
 def test_run_appends_within_same_day(
     tmp_path: Path,
     capsys: pytest.CaptureFixture,
@@ -429,7 +474,13 @@ def test_run_appends_within_same_day(
     """Running twice on the same day appends a second header + body to the daily log file."""
     ws = _setup_workspace(tmp_path)
 
-    def fake_tick(workspace: Workspace, *, dry_run: bool, log: Callable[[str], None]) -> SimpleNamespace:  # noqa: ARG001
+    def fake_tick(
+        workspace: Workspace,
+        *,
+        dry_run: bool,
+        log: Callable[[str], None],
+        max_issues: int = 0,
+    ) -> SimpleNamespace:
         log("hello-from-stub")
         return SimpleNamespace(error=None, total_turns=0, repos=[])
 
@@ -465,7 +516,13 @@ def test_run_swallows_log_write_errors(
     blocker.mkdir()  # opening this path for writing raises IsADirectoryError (an OSError)
     try:
 
-        def fake_tick(workspace: Workspace, *, dry_run: bool, log: Callable[[str], None]) -> SimpleNamespace:  # noqa: ARG001
+        def fake_tick(
+            workspace: Workspace,
+            *,
+            dry_run: bool,
+            log: Callable[[str], None],
+            max_issues: int = 0,
+        ) -> SimpleNamespace:
             log("would-be-logged")
             return SimpleNamespace(error=None, total_turns=0, repos=[])
 

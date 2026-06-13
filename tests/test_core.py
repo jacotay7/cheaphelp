@@ -12,7 +12,7 @@ from cheaphelp._internal.config import DEFAULT_AGENT_TIMEOUT, DEFAULT_MODELS, Co
 from cheaphelp._internal.env import parse_env, read_env_file, update_env_file
 from cheaphelp._internal.github import Comment, Issue
 from cheaphelp._internal.lock import RunLock
-from cheaphelp._internal.orchestrator import classify
+from cheaphelp._internal.orchestrator import _process_repo, classify
 from cheaphelp._internal.registry import Registry, RepoEntry, parse_slug
 from cheaphelp._internal.responder import (
     ATTRIBUTION_PREFIX,
@@ -56,6 +56,92 @@ def test_agent_timeout_default_and_roundtrip() -> None:
     assert Config.from_dict(cfg.to_dict()).agent_timeout == 1200.0
     # Float-typed values are accepted (the spec says `float`).
     assert Config.from_dict({"agent_timeout": 30.5}).agent_timeout == 30.5
+
+
+def test_max_issues_per_tick_default_and_roundtrip() -> None:
+    # Default when constructed with no args / absent from the on-disk dict.
+    assert Config().max_issues_per_tick == 0
+    assert Config.from_dict({}).max_issues_per_tick == 0
+    # User override is honoured by from_dict and preserved by to_dict.
+    cfg = Config.from_dict({"max_issues_per_tick": 5})
+    assert cfg.max_issues_per_tick == 5
+    assert Config.from_dict(cfg.to_dict()).max_issues_per_tick == 5
+    # String values are coerced via int(...).
+    assert Config.from_dict({"max_issues_per_tick": "7"}).max_issues_per_tick == 7
+
+
+class _FakeGitHub:
+    """Minimal stand-in for GitHubClient used by _process_repo tests."""
+
+    def __init__(self, issue_count: int) -> None:
+        self._issues = [
+            Issue(number=n, title="t", body="b", state="open", labels=[], user="human", html_url="")
+            for n in range(1, issue_count + 1)
+        ]
+
+    def list_open_issues(self, _owner: str, _name: str) -> list[Issue]:
+        return self._issues
+
+    def list_issue_comments(self, _owner: str, _name: str, _number: int) -> list[Comment]:
+        return []
+
+    def authenticated_login(self) -> str:
+        return "mybot"
+
+
+def test_process_repo_caps_work_to_max_issues(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    ws.save_config(Config())
+    # Make _is_mock() true so _process_repo never tries to clone.
+    monkeypatch.setenv("CHEAPHELP_AGENT_MOCK", "/dev/null")
+    repo = RepoEntry(owner="octocat", name="hello")
+    fake_gh = _FakeGitHub(5)
+
+    # All five issues classify to "responder"; cap to 2.
+    report = _process_repo(
+        fake_gh,  # ty: ignore[invalid-argument-type]
+        ws,
+        Config(),
+        repo,
+        "mybot",
+        "token",
+        dry_run=True,
+        log=lambda _m: None,
+        max_issues=2,
+    )
+    assert len(report.actions) == 2
+    assert report.issues_considered == 5  # uncapped count is recorded
+
+    # Default (0) = unlimited: all five are processed.
+    report = _process_repo(
+        fake_gh,  # ty: ignore[invalid-argument-type]
+        ws,
+        Config(),
+        repo,
+        "mybot",
+        "token",
+        dry_run=True,
+        log=lambda _m: None,
+    )
+    assert len(report.actions) == 5
+
+    # Cap larger than the work list does not underflow.
+    report = _process_repo(
+        fake_gh,  # ty: ignore[invalid-argument-type]
+        ws,
+        Config(),
+        repo,
+        "mybot",
+        "token",
+        dry_run=True,
+        log=lambda _m: None,
+        max_issues=10,
+    )
+    assert len(report.actions) == 5
 
 
 def test_variant_for() -> None:

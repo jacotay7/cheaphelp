@@ -106,6 +106,9 @@ class Config:
     poll_interval: str = DEFAULT_POLL_INTERVAL
     opencode_bin: str = "opencode"
     agent_timeout: float = DEFAULT_AGENT_TIMEOUT
+    # Cap on issues processed per repo per tick (0 = unlimited). A CLI
+    # `--max-issues` flag overrides this when > 0.
+    max_issues_per_tick: int = 0
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Config:
@@ -120,6 +123,7 @@ class Config:
             poll_interval=str(data.get("poll_interval", DEFAULT_POLL_INTERVAL)),
             opencode_bin=str(data.get("opencode_bin", "opencode")),
             agent_timeout=float(data.get("agent_timeout", DEFAULT_AGENT_TIMEOUT)),
+            max_issues_per_tick=int(data.get("max_issues_per_tick", 0)),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -134,6 +138,7 @@ class Config:
             "poll_interval": self.poll_interval,
             "opencode_bin": self.opencode_bin,
             "agent_timeout": self.agent_timeout,
+            "max_issues_per_tick": self.max_issues_per_tick,
         }
 
     def model_for(self, role: str) -> str:
