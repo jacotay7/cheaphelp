@@ -193,13 +193,13 @@ def cmd_run(args: argparse.Namespace) -> int:
     if (rc := _require_workspace(ws)) is not None:
         return rc
 
-    log_path = ws.logs_dir / f"run-{datetime.date.today().isoformat()}.log"
-    header = f"[{datetime.datetime.now():%Y-%m-%d %H:%M:%S}] --- tick start ---"
+    log_path = ws.logs_dir / f"run-{datetime.datetime.now(datetime.timezone.utc).date().isoformat()}.log"
+    header = f"[{datetime.datetime.now(datetime.timezone.utc):%Y-%m-%d %H:%M:%S}] --- tick start ---"
 
     def log(msg: str) -> None:
         print(msg)
         try:
-            with open(log_path, "a", encoding="utf-8") as f:
+            with log_path.open("a", encoding="utf-8") as f:
                 f.write(msg + "\n")
         except OSError:
             pass  # don't crash the tick for a log write failure
