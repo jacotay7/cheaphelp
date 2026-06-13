@@ -1,0 +1,21 @@
+# Changes here will be overwritten by Copier.
+_commit: 1.12.1
+_src_path: gh:pawamoy/copier-uv
+author_email: jacobataylor7@gmail.com
+author_fullname: Jacob Taylor
+author_username: jacobataylor7
+copyright_date: '2026'
+copyright_holder: Jacob Taylor
+copyright_holder_email: jacobataylor7@gmail.com
+copyright_license: MIT
+project_description: An AI software-engineer that triages GitHub issues, plans, implements,
+    and reviews changes on your repos using cheap OpenRouter models via the opencode
+    harness.
+project_name: cheaphelp
+python_package_command_line_name: cheaphelp
+python_package_distribution_name: cheaphelp
+python_package_import_name: cheaphelp
+repository_name: cheaphelp
+repository_namespace: jacobataylor7
+repository_provider: github.com
+

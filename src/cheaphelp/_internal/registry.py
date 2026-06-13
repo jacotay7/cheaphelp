@@ -1,0 +1,98 @@
+"""Registry of GitHub repositories cheaphelp is allowed to act on.
+
+Stored as `<workspace>/repos.json`. Each entry records the owner/name, the
+default branch (cached for convenience) and whether the repo is currently
+enabled for processing.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+
+_SLUG_RE = re.compile(r"^([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)$")
+
+
+def parse_slug(slug: str) -> tuple[str, str]:
+    """Parse an ``owner/name`` slug, accepting full GitHub URLs too."""
+    text = slug.strip()
+    text = re.sub(r"^https?://github\.com/", "", text)
+    text = re.sub(r"\.git$", "", text)
+    text = text.strip("/")
+    match = _SLUG_RE.match(text)
+    if not match:
+        raise ValueError(f"Invalid repository slug: {slug!r} (expected 'owner/name')")
+    return match.group(1), match.group(2)
+
+
+@dataclass
+class RepoEntry:
+    """A single registered repository."""
+
+    owner: str
+    name: str
+    default_branch: str = "main"
+    enabled: bool = True
+    added_at: str = ""
+
+    @property
+    def slug(self) -> str:
+        return f"{self.owner}/{self.name}"
+
+
+class Registry:
+    """Load/save the list of registered repositories."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+
+    def load(self) -> list[RepoEntry]:
+        if not self.path.exists():
+            return []
+        data = json.loads(self.path.read_text(encoding="utf-8"))
+        return [RepoEntry(**item) for item in data.get("repos", [])]
+
+    def save(self, repos: list[RepoEntry]) -> None:
+        payload = {"repos": [asdict(repo) for repo in repos]}
+        self.path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+    def find(self, owner: str, name: str) -> RepoEntry | None:
+        for repo in self.load():
+            if repo.owner == owner and repo.name == name:
+                return repo
+        return None
+
+    def add(self, entry: RepoEntry) -> bool:
+        """Add a repo. Returns False if it was already registered."""
+        repos = self.load()
+        for existing in repos:
+            if existing.owner == entry.owner and existing.name == entry.name:
+                return False
+        if not entry.added_at:
+            entry.added_at = datetime.now(timezone.utc).isoformat()
+        repos.append(entry)
+        self.save(repos)
+        return True
+
+    def remove(self, owner: str, name: str) -> bool:
+        """Remove a repo. Returns False if it was not registered."""
+        repos = self.load()
+        kept = [r for r in repos if not (r.owner == owner and r.name == name)]
+        if len(kept) == len(repos):
+            return False
+        self.save(kept)
+        return True
+
+    def set_enabled(self, owner: str, name: str, enabled: bool) -> bool:
+        repos = self.load()
+        changed = False
+        for repo in repos:
+            if repo.owner == owner and repo.name == name:
+                repo.enabled = enabled
+                changed = True
+        if changed:
+            self.save(repos)
+        return changed
