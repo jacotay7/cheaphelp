@@ -586,12 +586,12 @@ def test_status_happy_path_groups_and_stages(
     assert "responder" in other_line
 
 
-def test_status_none_stage_renders_dash(
+def test_status_in_review_label_shows_in_review_stage(
     tmp_path: Path,
     capsys: pytest.CaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Issues whose ``classify()`` returns ``None`` are rendered with a literal ``-``."""
+    """Issues with the `in-review` label are rendered with the literal stage name `in-review`."""
     ws = _setup_workspace(tmp_path)
     _seed_workspace_env(ws, token=_TEST_TOKEN)
 
@@ -622,8 +622,52 @@ def test_status_none_stage_renders_dash(
 
     captured = capsys.readouterr()
     issue_line = next(line for line in captured.out.splitlines() if "#1" in line)
-    # The stage column shows a literal dash, not the word "None".
-    assert issue_line.rstrip().endswith("-")
+    # The stage column shows the literal stage name, not a dash or the word "None".
+    assert "in-review" in issue_line
+    # Defensive: guard against a future regression that leaks None back into the column.
+    assert "None" not in issue_line
+
+
+def test_status_idle_stage_renders_idle(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fresh issue (no labels) whose last comment is from the bot renders as `idle`."""
+    ws = _setup_workspace(tmp_path)
+    _seed_workspace_env(ws, token=_TEST_TOKEN)
+
+    Registry(ws.registry_path).add(RepoEntry(owner="octocat", name="hello", enabled=True))
+
+    fake = _FakeGH("test-token")
+    fake.issues["octocat/hello"] = [
+        Issue(
+            number=1,
+            title="Quiet issue",
+            body="",
+            state="open",
+            labels=[],
+            user="alice",
+            html_url="",
+        ),
+    ]
+    # Bot authored the last comment, so the responder is not waiting on anything.
+    fake.comments[("octocat/hello", 1)] = [
+        Comment(id=1, body="hi", user=fake.login, created_at=""),
+    ]
+
+    def _factory(token: str, **_kwargs: object) -> _FakeGH:
+        fake.token = token
+        return fake
+
+    monkeypatch.setattr(commands, "GitHubClient", _factory)
+
+    rc = main(["--home", str(ws.home), "status"])
+    assert rc == 0
+
+    captured = capsys.readouterr()
+    issue_line = next(line for line in captured.out.splitlines() if "#1" in line)
+    assert "idle" in issue_line
     assert "None" not in issue_line
 
 

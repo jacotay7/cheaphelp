@@ -376,7 +376,7 @@ def cmd_status(args: argparse.Namespace) -> int:
                         print(f"  ! failed to list comments for #{issue.number}: {exc}", file=sys.stderr)
                         comments = []
                     stage = classify(issue, comments, bot_login, config)
-                    label = stage or "-"
+                    label = stage
                     title = issue.title[: title_width - 1] + "\u2026" if len(issue.title) > title_width else issue.title
                     print(f"  #{issue.number:<6} {title:<{title_width}}  {label}")
     except GitHubError as exc:

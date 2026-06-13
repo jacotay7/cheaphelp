@@ -464,12 +464,15 @@ def test_classify_stages() -> None:
     assert classify(_issue_with([lab["planned"]]), [], bot, cfg) == "build"
     # In-progress alone (defensive) -> build.
     assert classify(_issue_with([lab["in_progress"]]), [], bot, cfg) == "build"
-    # Terminal / waiting -> nothing.
-    assert classify(_issue_with([lab["rejected"]]), [], bot, cfg) is None
-    assert classify(_issue_with([lab["in_review"]]), [], bot, cfg) is None
-    assert classify(_issue_with([lab["needs_human"]]), [], bot, cfg) is None
-    # In-progress with a terminal label still resolves to None.
-    assert classify(_issue_with([lab["in_progress"], lab["in_review"]]), [], bot, cfg) is None
+    # Terminal / waiting -> named stage.
+    assert classify(_issue_with([lab["rejected"]]), [], bot, cfg) == "rejected"
+    assert classify(_issue_with([lab["in_review"]]), [], bot, cfg) == "in-review"
+    assert classify(_issue_with([lab["needs_human"]]), [], bot, cfg) == "needs-human"
+    # Idle: no label and the last comment is from the bot (no responder turn needed).
+    bot_c = Comment(id=1, body="hi", user=bot, created_at="")
+    assert classify(_issue_with([]), [bot_c], bot, cfg) == "idle"
+    # Terminal labels win over in-progress (precedence: rejected > in-review > needs-human).
+    assert classify(_issue_with([lab["in_progress"], lab["in_review"]]), [], bot, cfg) == "in-review"
 
 
 # --- workspace lock --------------------------------------------------------
