@@ -40,7 +40,7 @@ def classify(issue: Issue, comments: list, bot_login: str, config: Config) -> st
     # Terminal / waiting-on-human states: leave alone.
     if labels & {lab["rejected"], lab["in_review"], lab["needs_human"]}:
         return None
-    if lab["planned"] in labels:
+    if lab["planned"] in labels or lab["in_progress"] in labels:
         return "build"  # worker or reviewer, decided by task state
     if labels & {lab["ready"], lab["needs_replan"]}:
         return "planner"
