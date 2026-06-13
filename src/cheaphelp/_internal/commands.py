@@ -207,11 +207,15 @@ def cmd_repo_set(args: argparse.Namespace) -> int:
         print(f"Nothing to update for {owner}/{name}.")
         return 0
 
-    if Registry(ws.registry_path).update(owner, name, **updates):
+    registry = Registry(ws.registry_path)
+    if registry.find(owner, name) is None:
+        print(f"{owner}/{name} is not registered.", file=sys.stderr)
+        return 1
+    if registry.update(owner, name, **updates):
         print(f"Updated {owner}/{name}.")
         return 0
-    print(f"{owner}/{name} is not registered.", file=sys.stderr)
-    return 1
+    print(f"No changes for {owner}/{name}.")
+    return 0
 
 
 # --- run -------------------------------------------------------------------

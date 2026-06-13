@@ -175,11 +175,11 @@ def test_registry_update(tmp_path: Path) -> None:
     assert found.default_branch == "develop"
     assert found.added_at == "2024-01-01T00:00:00+00:00"
 
-    # 6. Calling update with no kwargs (or only None kwargs) returns True,
-    # does not change any field, and does not rewrite the file.
+    # 6. Calling update with no kwargs (or only None kwargs) returns False
+    # (no change), does not change any field, and does not rewrite the file.
     mtime_before = reg.path.stat().st_mtime_ns
-    assert reg.update("o", "r") is True
-    assert reg.update("o", "r", checks=None, autofix=None) is True
+    assert reg.update("o", "r") is False
+    assert reg.update("o", "r", checks=None, autofix=None) is False
     mtime_after = reg.path.stat().st_mtime_ns
     assert mtime_before == mtime_after
     found = reg.find("o", "r")

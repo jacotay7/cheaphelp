@@ -286,6 +286,52 @@ def test_repo_set_no_flags_is_noop(
     assert reloaded.autofix == "same-autofix"
 
 
+def test_repo_set_same_value_is_no_change(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """`repo set --checks <same value>` reports "No changes" and leaves the registry file untouched."""
+    ws = _setup_workspace(tmp_path)
+    Registry(ws.registry_path).add(
+        RepoEntry(
+            owner="octocat",
+            name="hello",
+            checks="existing-cmd",
+            autofix="existing-fix",
+        ),
+    )
+    before_bytes = ws.registry_path.read_bytes()
+    before_mtime_ns = ws.registry_path.stat().st_mtime_ns
+
+    rc = main(
+        [
+            "--home",
+            str(ws.home),
+            "repo",
+            "set",
+            "octocat/hello",
+            "--checks",
+            "existing-cmd",
+        ],
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "No changes for octocat/hello." in out
+    # The old "Updated ..." message must not leak through for a no-change run.
+    assert "Updated" not in out
+
+    after_bytes = ws.registry_path.read_bytes()
+    after_mtime_ns = ws.registry_path.stat().st_mtime_ns
+    # Byte-identical (and mtime untouched): a no-op must not rewrite the registry.
+    assert before_bytes == after_bytes
+    assert before_mtime_ns == after_mtime_ns
+
+    reloaded = Registry(ws.registry_path).find("octocat", "hello")
+    assert reloaded is not None
+    assert reloaded.checks == "existing-cmd"
+    assert reloaded.autofix == "existing-fix"
+
+
 def test_repo_set_list_reflects_update(
     tmp_path: Path,
     capsys: pytest.CaptureFixture,
