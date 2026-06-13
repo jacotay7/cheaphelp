@@ -35,13 +35,22 @@ cheaphelp:planned, all tasks done  -> quality gate -> reviewer  open PR or repla
 
 ### Quality gate
 
-Before the reviewer can open a PR, the orchestrator runs the repository's
-**check command** (`checks` in the registry — set it with
-`cheaphelp repo add <slug> --checks "…"`) inside the work clone. A **failing
-gate never becomes a PR**: the failure is written to the issue's `replan.md`, the
-issue is relabeled `needs-replan`, and the planner produces a minimal corrective
-plan. This is the deterministic backstop so lint/test failures can't slip into a
-pull request even if an agent misses them. Leave `checks` empty to disable.
+Before the reviewer can open a PR, the orchestrator runs two registry-configured
+commands inside the work clone:
+
+1. **`autofix`** (set with `--autofix`) runs first — e.g.
+   `ruff check --fix . ; ruff format .`. Any changes it makes are committed
+   automatically. This resolves trivial issues (formatting, import order,
+   `--fix`-able lint) cheaply, so they never escalate to a re-plan.
+2. **`checks`** (set with `--checks`) is the gate — e.g. `ruff check . && pytest`.
+   A **failing gate never becomes a PR**: the remaining failures are written to
+   the issue's `replan.md`, the issue is relabeled `needs-replan`, and the
+   planner produces a minimal corrective plan.
+
+Set them when registering: `cheaphelp repo add <slug> --autofix "…" --checks "…"`.
+Leave either empty to disable that step. Together they are the deterministic
+backstop so lint/test failures can't slip into a pull request even if an agent
+misses them.
 
 ## Why opencode + OpenRouter
 

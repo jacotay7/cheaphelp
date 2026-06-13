@@ -37,6 +37,10 @@ class RepoEntry:
     default_branch: str = "main"
     enabled: bool = True
     added_at: str = ""
+    # Shell command run in the work clone to auto-fix trivial issues (formatting,
+    # import sorting, lint --fix) before the quality gate runs. Any resulting
+    # changes are committed automatically. Empty disables auto-fix.
+    autofix: str = ""
     # Shell command run in the work clone as a quality gate before a PR is
     # opened (e.g. "ruff check . && pytest"). Empty disables the gate.
     checks: str = ""
