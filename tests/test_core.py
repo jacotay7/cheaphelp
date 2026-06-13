@@ -82,6 +82,13 @@ def test_registry_add_remove_toggle(tmp_path: Path) -> None:
     assert reg.remove("o", "r") is False
 
 
+def test_registry_checks_roundtrip(tmp_path: Path) -> None:
+    reg = Registry(tmp_path / "repos.json")
+    assert RepoEntry(owner="o", name="r").checks == ""  # default: gate disabled
+    reg.add(RepoEntry(owner="o", name="r", checks="ruff check . && pytest"))
+    assert reg.find("o", "r").checks == "ruff check . && pytest"
+
+
 # --- responder -------------------------------------------------------------
 def _issue(number: int = 1, labels: list[str] | None = None) -> Issue:
     return Issue(

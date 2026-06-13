@@ -113,6 +113,40 @@ def _run_planner(gh, workspace, config, repo, issue, cwd, log, report) -> None: 
         report.actions.append(f"#{issue.number}: planned {res.task_count} task(s)")
 
 
+def _quality_gate(gh, workspace, config, repo, number, work_dir, log, report) -> bool:  # noqa: ANN001
+    """Run the repo's check command in the clone. On failure, loop back to planner.
+
+    Returns True if checks passed (proceed to the reviewer), False otherwise.
+    """
+    log(f"  · {repo.slug}#{number}: running quality gate ({repo.checks})")
+    try:
+        rc, output = gitutil.run_command(work_dir, repo.checks)
+    except Exception as exc:  # noqa: BLE001
+        rc, output = 1, f"quality gate could not run: {exc}"
+    if rc == 0:
+        log(f"  > {repo.slug}#{number}: quality gate passed")
+        return True
+
+    tail = output[-4000:]
+    issue_dir = workspace.issue_dir(repo.owner, repo.name, number)
+    (issue_dir / "replan.md").write_text(
+        f"The automated quality checks failed (exit {rc}). The implementation must "
+        f"be corrected before it can be reviewed. Command:\n\n    {repo.checks}\n\n"
+        f"Output (tail):\n\n```\n{tail}\n```\n",
+        encoding="utf-8",
+    )
+    gh.ensure_label(repo.owner, repo.name, config.labels["needs_replan"], color="fbca04",
+                    description="cheaphelp: reviewer sent back to planner")
+    gh.add_labels(repo.owner, repo.name, number, [config.labels["needs_replan"]])
+    gh.remove_label(repo.owner, repo.name, number, config.labels["planned"])
+    gh.create_comment(repo.owner, repo.name, number,
+                      f"{responder.BOT_MARKER}\n\nQuality checks failed; sending back to planning.\n\n"
+                      f"```\n{tail[-1500:]}\n```")
+    log(f"  ! {repo.slug}#{number}: quality gate FAILED -> needs-replan")
+    report.actions.append(f"#{number}: quality gate failed")
+    return False
+
+
 def _run_build(gh, workspace, config, repo, issue, token, log, report) -> None:  # noqa: ANN001
     """Worker + reviewer stage for a planned issue."""
     number = issue.number
@@ -149,6 +183,9 @@ def _run_build(gh, workspace, config, repo, issue, token, log, report) -> None: 
 
     tasks = store.load()
     if store.all_done(tasks):
+        # Quality gate: a failing check never becomes a PR — loop back to planning.
+        if repo.checks and not _quality_gate(gh, workspace, config, repo, number, work_dir, log, report):
+            return
         log(f"  > {repo.slug}#{number}: all tasks done; running reviewer")
         rr = reviewer.review_issue(gh, workspace, config, repo, number, work_dir, token=token)
         report.turns_taken += 1

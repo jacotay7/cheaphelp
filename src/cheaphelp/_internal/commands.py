@@ -120,7 +120,14 @@ def cmd_repo_add(args: argparse.Namespace) -> int:
         print("Warning: no GITHUB_TOKEN set; adding without verification.", file=sys.stderr)
 
     registry = Registry(ws.registry_path)
-    added = registry.add(RepoEntry(owner=owner, name=name, default_branch=default_branch))
+    added = registry.add(
+        RepoEntry(
+            owner=owner,
+            name=name,
+            default_branch=default_branch,
+            checks=getattr(args, "checks", "") or "",
+        ),
+    )
     if not added:
         print(f"{owner}/{name} is already registered.")
         return 0

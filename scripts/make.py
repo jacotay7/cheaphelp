@@ -81,10 +81,10 @@ def run(version: str, cmd: str, *args: str, **kwargs: Any) -> None:
     try:
         if version == "default":
             with environ(UV_PROJECT_ENVIRONMENT=".venv"):
-                subprocess.run([*uv_run, cmd, *args], **kwargs)  # noqa: S603, PLW1510
+                subprocess.run([*uv_run, cmd, *args], **kwargs)  # noqa: PLW1510
         else:
             with environ(UV_PROJECT_ENVIRONMENT=f".venvs/{version}", MULTIRUN="1"):
-                subprocess.run([*uv_run, cmd, *args], **kwargs)  # noqa: S603, PLW1510
+                subprocess.run([*uv_run, cmd, *args], **kwargs)  # noqa: PLW1510
     except subprocess.CalledProcessError as process:
         raise _RunError(
             returncode=process.returncode,

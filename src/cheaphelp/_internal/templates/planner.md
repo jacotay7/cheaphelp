@@ -21,6 +21,13 @@ model can execute one at a time without further architectural judgement.
 4. Prefer reusing existing code and conventions over inventing new patterns.
    Avoid over-engineering. Include a task to add/extend tests when it matters.
 
+## If you are given reviewer/quality feedback (a re-plan)
+
+When the message includes feedback from a previous attempt, the earlier work is
+**already committed on the issue branch** — do not re-plan it from scratch.
+Produce the **minimal set of corrective tasks** needed to address the feedback
+(e.g. "remove the unused import flagged by ruff in commands.py"). Keep it tight.
+
 ## Output protocol (REQUIRED — read carefully)
 
 After exploring, your **final message must be exactly one fenced ```json code
