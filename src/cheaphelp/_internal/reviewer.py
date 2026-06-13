@@ -102,7 +102,13 @@ def apply_review(
         gitutil.push_branch(clone_dir, repo, branch=branch, token=token)
         title = str(decision.get("pr_title") or f"cheaphelp: resolve #{number}").strip()
         body = str(decision.get("pr_body") or "").strip()
-        body = f"{body}\n\nCloses #{number}\n\n_Opened by cheaphelp; awaiting human review._"
+        reviewers = config.pr_reviewers or [repo.owner]
+        mentions = " ".join(f"@{r}" for r in reviewers)
+        body = (
+            f"{body}\n\nCloses #{number}\n\n"
+            f"Requested reviewer(s): {mentions}\n\n"
+            "_Opened by cheaphelp; awaiting human review._"
+        )
         try:
             pr = gh.create_pull_request(
                 repo.owner, repo.name,
@@ -110,6 +116,10 @@ def apply_review(
             )
         except Exception as exc:  # noqa: BLE001
             return ReviewResult(number=number, decision=choice, error=str(exc))
+        # Best-effort formal review request. GitHub rejects requesting the PR
+        # author (common when the bot is the repo owner); the @mention above
+        # still notifies them in that case.
+        gh.request_reviewers(repo.owner, repo.name, int(pr.get("number", 0)), reviewers)
         gh.ensure_label(repo.owner, repo.name, config.labels["in_review"], color="5319e7",
                         description="cheaphelp: PR open, awaiting human review")
         gh.add_labels(repo.owner, repo.name, number, [config.labels["in_review"]])
