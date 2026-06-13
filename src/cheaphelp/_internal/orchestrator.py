@@ -23,6 +23,7 @@ from cheaphelp._internal.config import Config, Workspace
 from cheaphelp._internal.env import GITHUB_TOKEN_KEY, OPENROUTER_API_KEY, load_into_environ
 from cheaphelp._internal.github import GitHubClient, Issue
 from cheaphelp._internal.gitutil import ensure_clone
+from cheaphelp._internal.lock import RunLock
 from cheaphelp._internal.registry import Registry, RepoEntry
 from cheaphelp._internal.tasks import TaskStore
 
@@ -68,6 +69,7 @@ class TickReport:
     dry_run: bool = False
     repos: list[RepoReport] = field(default_factory=list)
     error: str | None = None
+    skipped: bool = False
 
     @property
     def total_turns(self) -> int:
@@ -311,43 +313,51 @@ def tick(workspace: Workspace, *, dry_run: bool = False, log: Logger | None = No
     log = log or (lambda _msg: None)
     report = TickReport(dry_run=dry_run)
 
-    if not workspace.exists():
-        report.error = "workspace not initialised; run `cheaphelp init` first"
+    with RunLock(workspace.run_lock_path) as lock:
+        if not lock.acquired:
+            pid = lock.holder_pid
+            suffix = f" (PID {pid})" if pid is not None else ""
+            log(f"Another tick is already running{suffix}; skipping.")
+            report.skipped = True
+            return report
+
+        if not workspace.exists():
+            report.error = "workspace not initialised; run `cheaphelp init` first"
+            return report
+
+        load_into_environ(workspace.env_path)
+        config = workspace.load_config()
+        token = os.environ.get(GITHUB_TOKEN_KEY, "")
+
+        if not token:
+            report.error = f"{GITHUB_TOKEN_KEY} not set; add it to {workspace.env_path}"
+            return report
+        if not _is_mock() and not os.environ.get(OPENROUTER_API_KEY):
+            log(f"  (warning: {OPENROUTER_API_KEY} not set; agent calls will fail)")
+
+        repos = [r for r in Registry(workspace.registry_path).load() if r.enabled]
+        if not repos:
+            report.error = "no enabled repositories registered; use `cheaphelp repo add owner/name`"
+            return report
+
+        try:
+            with GitHubClient(token) as gh:
+                report.bot_login = gh.authenticated_login()
+                log(f"acting as @{report.bot_login} ({'dry-run' if dry_run else 'live'})")
+                for repo in repos:
+                    report.repos.append(
+                        _process_repo(
+                            gh,
+                            workspace,
+                            config,
+                            repo,
+                            report.bot_login,
+                            token,
+                            dry_run=dry_run,
+                            log=log,
+                        ),
+                    )
+        except Exception as exc:  # noqa: BLE001 - top-level guard for the tick
+            report.error = str(exc)
+
         return report
-
-    load_into_environ(workspace.env_path)
-    config = workspace.load_config()
-    token = os.environ.get(GITHUB_TOKEN_KEY, "")
-
-    if not token:
-        report.error = f"{GITHUB_TOKEN_KEY} not set; add it to {workspace.env_path}"
-        return report
-    if not _is_mock() and not os.environ.get(OPENROUTER_API_KEY):
-        log(f"  (warning: {OPENROUTER_API_KEY} not set; agent calls will fail)")
-
-    repos = [r for r in Registry(workspace.registry_path).load() if r.enabled]
-    if not repos:
-        report.error = "no enabled repositories registered; use `cheaphelp repo add owner/name`"
-        return report
-
-    try:
-        with GitHubClient(token) as gh:
-            report.bot_login = gh.authenticated_login()
-            log(f"acting as @{report.bot_login} ({'dry-run' if dry_run else 'live'})")
-            for repo in repos:
-                report.repos.append(
-                    _process_repo(
-                        gh,
-                        workspace,
-                        config,
-                        repo,
-                        report.bot_login,
-                        token,
-                        dry_run=dry_run,
-                        log=log,
-                    ),
-                )
-    except Exception as exc:  # noqa: BLE001 - top-level guard for the tick
-        report.error = str(exc)
-
-    return report
