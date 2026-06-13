@@ -269,6 +269,7 @@ def _process_repo(
     *,
     dry_run: bool,
     log: Logger,
+    max_issues: int = 0,
 ) -> RepoReport:
     report = RepoReport(slug=repo.slug)
     try:
@@ -285,6 +286,10 @@ def _process_repo(
         if stage in _ACTIONABLE_STAGES:
             work.append((stage, issue, comments))
     report.issues_considered = len(work)
+
+    if max_issues > 0 and len(work) > max_issues:
+        log(f"  · {repo.slug}: capping at {max_issues} issue(s) this tick ({len(work)} actionable)")
+        work = work[:max_issues]
 
     if not work:
         log(f"  - {repo.slug}: nothing to do")
@@ -321,7 +326,13 @@ def _process_repo(
     return report
 
 
-def tick(workspace: Workspace, *, dry_run: bool = False, log: Logger | None = None) -> TickReport:
+def tick(
+    workspace: Workspace,
+    *,
+    dry_run: bool = False,
+    log: Logger | None = None,
+    max_issues: int = 0,
+) -> TickReport:
     """Run one orchestrator tick across all enabled repositories."""
     log = log or (lambda _msg: None)
     report = TickReport(dry_run=dry_run)
@@ -368,6 +379,7 @@ def tick(workspace: Workspace, *, dry_run: bool = False, log: Logger | None = No
                             token,
                             dry_run=dry_run,
                             log=log,
+                            max_issues=max_issues,
                         ),
                     )
         except Exception as exc:  # noqa: BLE001 - top-level guard for the tick
