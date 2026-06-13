@@ -87,10 +87,12 @@ def test_registry_add_remove_toggle(tmp_path: Path) -> None:
 def test_registry_checks_roundtrip(tmp_path: Path) -> None:
     reg = Registry(tmp_path / "repos.json")
     assert RepoEntry(owner="o", name="r").checks == ""  # default: gate disabled
-    reg.add(RepoEntry(owner="o", name="r", checks="ruff check . && pytest"))
+    assert RepoEntry(owner="o", name="r").autofix == ""  # default: auto-fix disabled
+    reg.add(RepoEntry(owner="o", name="r", checks="ruff check . && pytest", autofix="ruff format ."))
     found = reg.find("o", "r")
     assert found is not None
     assert found.checks == "ruff check . && pytest"
+    assert found.autofix == "ruff format ."
 
 
 # --- responder -------------------------------------------------------------

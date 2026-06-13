@@ -118,6 +118,17 @@ def _quality_gate(gh, workspace, config, repo, number, work_dir, log, report) ->
 
     Returns True if checks passed (proceed to the reviewer), False otherwise.
     """
+    # Cheap path first: auto-fix trivial issues (formatting, import order,
+    # lint --fix) and commit them, so they never trigger an expensive replan.
+    if repo.autofix:
+        log(f"  · {repo.slug}#{number}: auto-fixing ({repo.autofix})")
+        try:
+            gitutil.run_command(work_dir, repo.autofix)
+        except Exception as exc:  # noqa: BLE001
+            log(f"  · {repo.slug}#{number}: auto-fix command errored: {exc}")
+        if gitutil.commit_all(work_dir, message="cheaphelp: auto-fix (format/lint)"):
+            log(f"  > {repo.slug}#{number}: auto-fix made changes, committed")
+
     log(f"  · {repo.slug}#{number}: running quality gate ({repo.checks})")
     try:
         rc, output = gitutil.run_command(work_dir, repo.checks)

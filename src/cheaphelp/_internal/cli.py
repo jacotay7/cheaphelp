@@ -66,6 +66,12 @@ def get_parser() -> argparse.ArgumentParser:
         help="Quality-gate shell command run in the clone before a PR is opened "
         '(e.g. "ruff check . && pytest"). A failing gate sends the issue back to planning.',
     )
+    p_add.add_argument(
+        "--autofix",
+        default="",
+        help="Shell command run in the clone before the gate to auto-fix trivial "
+        'issues (e.g. "ruff check --fix . ; ruff format ."). Changes are committed.',
+    )
     p_add.set_defaults(func=commands.cmd_repo_add)
     repo_sub.add_parser("list", help="List registered repositories.").set_defaults(
         func=commands.cmd_repo_list,

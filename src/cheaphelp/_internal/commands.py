@@ -125,6 +125,7 @@ def cmd_repo_add(args: argparse.Namespace) -> int:
             owner=owner,
             name=name,
             default_branch=default_branch,
+            autofix=getattr(args, "autofix", "") or "",
             checks=getattr(args, "checks", "") or "",
         ),
     )
