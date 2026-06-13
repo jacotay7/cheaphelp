@@ -23,11 +23,15 @@ CONFIG_VERSION = 1
 DEFAULT_MODELS: dict[str, str] = {
     # Two-tier OpenRouter setup (verified live, 2026-06). Strings are opencode
     # model ids: openrouter/<openrouter-model-id>.
-    #   - cheap tier  (deepseek-v4-flash): high-volume conversational work.
-    #   - better tier (minimax-m3):        planning, implementation, review.
+    #   - cheap tier  (deepseek-v4-flash): high-volume conversational work and
+    #     per-task implementation (run with the `max` variant; see below).
+    #   - better tier (minimax-m3):        planning and review.
+    # The worker runs on the cheap tier (`max` variant) because each task is
+    # small and well-specified by the planner; this keeps ticks fast/cheap and
+    # avoids the slow minimax timeouts seen in field testing.
     "responder": "openrouter/deepseek/deepseek-v4-flash",
     "planner": "openrouter/minimax/minimax-m3",
-    "worker": "openrouter/minimax/minimax-m3",
+    "worker": "openrouter/deepseek/deepseek-v4-flash",
     "reviewer": "openrouter/minimax/minimax-m3",
 }
 
@@ -63,7 +67,7 @@ DEFAULT_AGENT_TIMEOUT = 600.0
 DEFAULT_VARIANTS: dict[str, str] = {
     "responder": "max",
     "planner": "",
-    "worker": "",
+    "worker": "max",
     "reviewer": "",
 }
 
