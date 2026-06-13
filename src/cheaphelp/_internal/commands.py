@@ -7,6 +7,7 @@ exit code. Keeping them here keeps `cli.py` focused on argument wiring.
 from __future__ import annotations
 
 import argparse
+import datetime
 import getpass
 import json
 import os
@@ -191,7 +192,20 @@ def cmd_run(args: argparse.Namespace) -> int:
     ws = _workspace(args)
     if (rc := _require_workspace(ws)) is not None:
         return rc
-    report = tick(ws, dry_run=args.dry_run, log=print)
+
+    log_path = ws.logs_dir / f"run-{datetime.date.today().isoformat()}.log"
+    header = f"[{datetime.datetime.now():%Y-%m-%d %H:%M:%S}] --- tick start ---"
+
+    def log(msg: str) -> None:
+        print(msg)
+        try:
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(msg + "\n")
+        except OSError:
+            pass  # don't crash the tick for a log write failure
+
+    log(header)
+    report = tick(ws, dry_run=args.dry_run, log=log)
     if report.error:
         print(f"\nError: {report.error}", file=sys.stderr)
         return 1
