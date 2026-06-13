@@ -469,7 +469,11 @@ def test_classify_stages() -> None:
     assert classify(_issue_with([lab["needs_replan"]]), [], bot, cfg) == "planner"
     # Planned -> build.
     assert classify(_issue_with([lab["planned"]]), [], bot, cfg) == "build"
+    # In-progress alone (defensive) -> build.
+    assert classify(_issue_with([lab["in_progress"]]), [], bot, cfg) == "build"
     # Terminal / waiting -> nothing.
     assert classify(_issue_with([lab["rejected"]]), [], bot, cfg) is None
     assert classify(_issue_with([lab["in_review"]]), [], bot, cfg) is None
     assert classify(_issue_with([lab["needs_human"]]), [], bot, cfg) is None
+    # In-progress with a terminal label still resolves to None.
+    assert classify(_issue_with([lab["in_progress"], lab["in_review"]]), [], bot, cfg) is None

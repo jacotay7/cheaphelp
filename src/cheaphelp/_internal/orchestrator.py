@@ -40,7 +40,7 @@ def classify(issue: Issue, comments: list, bot_login: str, config: Config) -> st
     # Terminal / waiting-on-human states: leave alone.
     if labels & {lab["rejected"], lab["in_review"], lab["needs_human"]}:
         return None
-    if lab["planned"] in labels:
+    if lab["planned"] in labels or lab["in_progress"] in labels:
         return "build"  # worker or reviewer, decided by task state
     if labels & {lab["ready"], lab["needs_replan"]}:
         return "planner"
@@ -160,6 +160,7 @@ def _quality_gate(gh, workspace, config, repo, number, work_dir, log, report) ->
     )
     gh.add_labels(repo.owner, repo.name, number, [config.labels["needs_replan"]])
     gh.remove_label(repo.owner, repo.name, number, config.labels["planned"])
+    gh.remove_label(repo.owner, repo.name, number, config.labels["in_progress"])
     gh.create_comment(
         repo.owner,
         repo.name,
@@ -193,6 +194,15 @@ def _run_build(gh, workspace, config, repo, issue, token, log, report) -> None: 
         log(f"  ! {repo.slug}#{number}: work clone failed: {exc}")
         report.actions.append(f"#{number}: work clone failed")
         return
+
+    gh.ensure_label(
+        repo.owner,
+        repo.name,
+        config.labels["in_progress"],
+        color="f9a825",
+        description="cheaphelp: worker is actively executing tasks",
+    )
+    gh.add_labels(repo.owner, repo.name, number, [config.labels["in_progress"]])
 
     # Run every currently-ready task; a linear chain finishes in one tick.
     ran = 0
@@ -229,6 +239,7 @@ def _run_build(gh, workspace, config, repo, issue, token, log, report) -> None: 
             description="cheaphelp: stuck; needs a human",
         )
         gh.add_labels(repo.owner, repo.name, number, [config.labels["needs_human"]])
+        gh.remove_label(repo.owner, repo.name, number, config.labels["in_progress"])
         log(f"  ! {repo.slug}#{number}: blocked; labeled needs-human")
         report.actions.append(f"#{number}: blocked")
 
