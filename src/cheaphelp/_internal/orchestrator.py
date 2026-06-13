@@ -1,9 +1,15 @@
 """The orchestrator: one tick of the cheaphelp state machine.
 
-A tick is what the systemd timer fires. For each enabled repository it polls
-open issues and dispatches the responder to any issue waiting on a turn. Later
-milestones will extend the same loop to dispatch the planner (on `ready`
-issues), workers (on pending tasks) and the reviewer (on completed work).
+A tick is what the systemd timer fires. For each enabled repository it polls open
+issues, classifies each into a pipeline stage by its labels, and dispatches the
+right agent:
+
+    (no pipeline label) + human spoke last  -> responder  (refine scope)
+    cheaphelp:ready / cheaphelp:needs-replan -> planner    (produce tasks)
+    cheaphelp:planned, tasks pending         -> worker     (implement) [phase 3]
+    cheaphelp:planned, all tasks done        -> reviewer   (PR/replan) [phase 4]
+
+Worker and reviewer stages are stubbed until their milestones land.
 """
 
 from __future__ import annotations
@@ -12,18 +18,35 @@ import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from cheaphelp._internal import opencode, responder
-from cheaphelp._internal.config import Workspace
+from cheaphelp._internal import gitutil, opencode, planner, responder, reviewer, worker
+from cheaphelp._internal.config import Config, Workspace
 from cheaphelp._internal.env import GITHUB_TOKEN_KEY, OPENROUTER_API_KEY, load_into_environ
-from cheaphelp._internal.github import GitHubClient
+from cheaphelp._internal.github import GitHubClient, Issue
 from cheaphelp._internal.gitutil import ensure_clone
 from cheaphelp._internal.registry import Registry, RepoEntry
+from cheaphelp._internal.tasks import TaskStore
 
 Logger = Callable[[str], None]
 
 
 def _is_mock() -> bool:
     return bool(os.environ.get("CHEAPHELP_AGENT_MOCK"))
+
+
+def classify(issue: Issue, comments: list, bot_login: str, config: Config) -> str | None:
+    """Return the pipeline stage for an issue, or None if there's nothing to do."""
+    labels = set(issue.labels)
+    lab = config.labels
+    # Terminal / waiting-on-human states: leave alone.
+    if labels & {lab["rejected"], lab["in_review"], lab["needs_human"]}:
+        return None
+    if lab["planned"] in labels:
+        return "build"  # worker or reviewer, decided by task state
+    if labels & {lab["ready"], lab["needs_replan"]}:
+        return "planner"
+    if responder.needs_turn(issue, comments, bot_login, config):
+        return "responder"
+    return None
 
 
 @dataclass
@@ -51,10 +74,99 @@ class TickReport:
         return sum(r.turns_taken for r in self.repos)
 
 
+def _run_responder(gh, workspace, config, repo, issue, comments, bot_login, cwd, log, report) -> None:  # noqa: ANN001
+    prompt = responder.build_prompt(issue, comments, bot_login)
+    result = opencode.run_agent(workspace, config, "responder", prompt, cwd=cwd)
+    if result.decision is None:
+        log(f"  ! {repo.slug}#{issue.number}: responder produced no decision (rc={result.returncode})")
+        report.actions.append(f"#{issue.number}: responder unparseable")
+        return
+    applied = responder.apply_decision(gh, workspace, config, repo.owner, repo.name, issue, result.decision)
+    report.turns_taken += 1
+    msg = f"#{issue.number}: responder {applied.action}" + (f" (error: {applied.error})" if applied.error else "")
+    report.actions.append(msg)
+    log(f"  > {repo.slug}{msg}")
+
+
+def _run_planner(gh, workspace, config, repo, issue, cwd, log, report) -> None:  # noqa: ANN001
+    issue_dir = workspace.issue_dir(repo.owner, repo.name, issue.number)
+    spec_path = issue_dir / "issues.md"
+    if not spec_path.exists():
+        log(f"  ! {repo.slug}#{issue.number}: no issues.md found; skipping planner")
+        report.actions.append(f"#{issue.number}: planner missing issues.md")
+        return
+    replan_path = issue_dir / "replan.md"
+    replan_notes = replan_path.read_text(encoding="utf-8") if replan_path.exists() else ""
+    prompt = planner.build_prompt(spec_path.read_text(encoding="utf-8"), replan_notes=replan_notes)
+    result = opencode.run_agent(workspace, config, "planner", prompt, cwd=cwd)
+    if result.decision is None:
+        log(f"  ! {repo.slug}#{issue.number}: planner produced no decision (rc={result.returncode})")
+        report.actions.append(f"#{issue.number}: planner unparseable")
+        return
+    res = planner.apply_plan(gh, workspace, config, repo.owner, repo.name, issue.number, result.decision)
+    report.turns_taken += 1
+    if res.error:
+        log(f"  ! {repo.slug}#{issue.number}: planner error: {res.error}")
+        report.actions.append(f"#{issue.number}: planner error ({res.error})")
+    else:
+        log(f"  > {repo.slug}#{issue.number}: planned {res.task_count} task(s)")
+        report.actions.append(f"#{issue.number}: planned {res.task_count} task(s)")
+
+
+def _run_build(gh, workspace, config, repo, issue, token, log, report) -> None:  # noqa: ANN001
+    """Worker + reviewer stage for a planned issue."""
+    number = issue.number
+    store = TaskStore(workspace.issue_dir(repo.owner, repo.name, number))
+    tasks = store.load()
+    if not tasks:
+        log(f"  ! {repo.slug}#{number}: planned but no tasks found; skipping")
+        report.actions.append(f"#{number}: no tasks")
+        return
+
+    branch = worker.branch_name(number)
+    work_dir = workspace.work_clone_path(repo.owner, repo.name, number)
+    try:
+        gitutil.ensure_work_clone(work_dir, repo, token=token, branch=branch)
+    except Exception as exc:  # noqa: BLE001
+        log(f"  ! {repo.slug}#{number}: work clone failed: {exc}")
+        report.actions.append(f"#{number}: work clone failed")
+        return
+
+    # Run every currently-ready task; a linear chain finishes in one tick.
+    ran = 0
+    while ran < len(tasks):
+        task = store.next_ready()
+        if task is None:
+            break
+        res = worker.run_task(workspace, config, repo, number, task, work_dir, token=token)
+        report.turns_taken += 1
+        ran += 1
+        flag = " +commit" if res.committed else ""
+        log(f"  > {repo.slug}#{number}: worker {task.id} -> {res.status}{flag}")
+        report.actions.append(f"#{number}: worker {task.id} {res.status}")
+        if res.status != "done":
+            break
+
+    tasks = store.load()
+    if store.all_done(tasks):
+        log(f"  > {repo.slug}#{number}: all tasks done; running reviewer")
+        rr = reviewer.review_issue(gh, workspace, config, repo, number, work_dir, token=token)
+        report.turns_taken += 1
+        detail = rr.pr_url or rr.error or rr.decision
+        log(f"  > {repo.slug}#{number}: reviewer {rr.decision} ({detail})")
+        report.actions.append(f"#{number}: reviewer {rr.decision}")
+    elif store.is_blocked(tasks):
+        gh.ensure_label(repo.owner, repo.name, config.labels["needs_human"], color="d93f0b",
+                        description="cheaphelp: stuck; needs a human")
+        gh.add_labels(repo.owner, repo.name, number, [config.labels["needs_human"]])
+        log(f"  ! {repo.slug}#{number}: blocked; labeled needs-human")
+        report.actions.append(f"#{number}: blocked")
+
+
 def _process_repo(
     gh: GitHubClient,
     workspace: Workspace,
-    config,  # noqa: ANN001 - Config, avoid import cycle noise
+    config: Config,
     repo: RepoEntry,
     bot_login: str,
     token: str,
@@ -70,24 +182,25 @@ def _process_repo(
         log(f"  ! {repo.slug}: failed to list issues: {exc}")
         return report
 
-    pending = []
+    work: list[tuple[str, Issue, list]] = []
     for issue in issues:
         comments = gh.list_issue_comments(repo.owner, repo.name, issue.number)
-        if responder.needs_turn(issue, comments, bot_login, config):
-            pending.append((issue, comments))
-    report.issues_considered = len(pending)
+        stage = classify(issue, comments, bot_login, config)
+        if stage:
+            work.append((stage, issue, comments))
+    report.issues_considered = len(work)
 
-    if not pending:
+    if not work:
         log(f"  - {repo.slug}: nothing to do")
         return report
 
     if dry_run:
-        for issue, _ in pending:
-            log(f"  · {repo.slug}#{issue.number}: would run responder")
-            report.actions.append(f"#{issue.number}: dry-run")
+        for stage, issue, _ in work:
+            log(f"  · {repo.slug}#{issue.number}: would run {stage}")
+            report.actions.append(f"#{issue.number}: dry-run {stage}")
         return report
 
-    # Clone the repo once so the responder can read the codebase.
+    # Clone once so read-only agents (responder, planner) can read the codebase.
     cwd = workspace.home
     if not _is_mock():
         try:
@@ -97,35 +210,17 @@ def _process_repo(
             log(f"  ! {repo.slug}: clone failed: {exc}")
             return report
 
-    for issue, comments in pending:
-        prompt = responder.build_prompt(issue, comments, bot_login)
+    for stage, issue, comments in work:
         try:
-            result = opencode.run_agent(workspace, config, "responder", prompt, cwd=cwd)
-        except Exception as exc:  # noqa: BLE001
-            log(f"  ! {repo.slug}#{issue.number}: agent error: {exc}")
-            report.actions.append(f"#{issue.number}: agent error")
-            continue
-
-        if result.decision is None:
-            log(f"  ! {repo.slug}#{issue.number}: no decision parsed (rc={result.returncode})")
-            report.actions.append(f"#{issue.number}: unparseable")
-            continue
-
-        applied = responder.apply_decision(
-            gh,
-            workspace,
-            config,
-            repo.owner,
-            repo.name,
-            issue,
-            result.decision,
-        )
-        report.turns_taken += 1
-        summary = f"#{issue.number}: {applied.action}"
-        if applied.error:
-            summary += f" (error: {applied.error})"
-        report.actions.append(summary)
-        log(f"  > {repo.slug}{summary}")
+            if stage == "responder":
+                _run_responder(gh, workspace, config, repo, issue, comments, bot_login, cwd, log, report)
+            elif stage == "planner":
+                _run_planner(gh, workspace, config, repo, issue, cwd, log, report)
+            elif stage == "build":
+                _run_build(gh, workspace, config, repo, issue, token, log, report)
+        except Exception as exc:  # noqa: BLE001 - one issue's failure must not abort the tick
+            log(f"  ! {repo.slug}#{issue.number}: {stage} crashed: {exc}")
+            report.actions.append(f"#{issue.number}: {stage} crashed")
 
     return report
 
@@ -161,14 +256,8 @@ def tick(workspace: Workspace, *, dry_run: bool = False, log: Logger | None = No
             for repo in repos:
                 report.repos.append(
                     _process_repo(
-                        gh,
-                        workspace,
-                        config,
-                        repo,
-                        report.bot_login,
-                        token,
-                        dry_run=dry_run,
-                        log=log,
+                        gh, workspace, config, repo, report.bot_login, token,
+                        dry_run=dry_run, log=log,
                     ),
                 )
     except Exception as exc:  # noqa: BLE001 - top-level guard for the tick

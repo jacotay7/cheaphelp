@@ -42,6 +42,15 @@ Pick exactly one action:
 Prefer `comment` when in doubt. Only `finalize` when you would be comfortable
 handing the spec to an engineer with no further questions.
 
+**Do not finalize on the first turn unless the request is genuinely unambiguous.**
+Most issues — especially short ones — are missing details: the expected
+behaviour, edge cases, the desired output/UX, scope boundaries, or how success is
+measured. When the conversation so far contains no replies from you yet, your
+default should be `comment` with 1–3 sharp clarifying questions. Reserve a
+first-turn `finalize` for requests that are already crisp and complete (e.g. a
+precise one-line change with an obvious, single correct implementation). It is
+better to ask one good question than to finalize a vague spec.
+
 ## Output protocol (REQUIRED — read carefully)
 
 Explore the repository first using your tools. Then your **final message must be

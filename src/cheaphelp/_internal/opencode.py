@@ -137,8 +137,12 @@ def build_opencode_config(config: Config, prompts: dict[str, str] | None = None)
                 "write": is_writer,
                 "edit": is_writer,
             },
+            # Explicit permissions so headless `run` never blocks on a prompt.
+            # Writers may edit and run shell commands; readers may not edit.
             "permission": {
                 "edit": "allow" if is_writer else "deny",
+                "bash": "allow",
+                "webfetch": "allow",
             },
         }
 
@@ -235,16 +239,25 @@ def run_agent(
 
     env = dict(os.environ)
     env["OPENCODE_CONFIG"] = str(workspace.opencode_config_path)
+    # opencode resolves its project directory from $PWD, which subprocess(cwd=...)
+    # does NOT update — set it explicitly and also pass --dir, or opencode will
+    # operate on the parent process's directory instead of the clone.
+    env["PWD"] = str(cwd)
 
     command = [
         binary,
         "run",
+        "--dir",
+        str(cwd),
         "--agent",
         role,
         "--model",
         config.model_for(role),
-        prompt,
     ]
+    variant = config.variant_for(role)
+    if variant:
+        command += ["--variant", variant]
+    command.append(prompt)
     proc = subprocess.run(
         command,
         cwd=str(cwd),

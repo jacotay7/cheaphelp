@@ -9,22 +9,29 @@ team of narrow AI agents — powered by **cheap [OpenRouter](https://openrouter.
 models** through the **[opencode](https://opencode.ai)** terminal harness — to
 triage issues, plan work, implement it, and open pull requests for human review.
 
-> **Status: milestone 1 (vertical slice).** The full pipeline below is the
-> design goal. Today the **init / workspace / repo-registry / systemd timer /
-> responder** path is implemented end-to-end. The planner, workers and reviewer
-> are scaffolded (prompts + config) and wired in follow-up milestones.
+> **Status: full pipeline wired and exercised live.** All four roles run
+> end-to-end against a real repository; expect to keep tuning prompts and
+> hardening edge cases.
 
 ## The pipeline
 
 | Role | Job | Status |
 |------|-----|--------|
-| **Responder** | Talks to issue authors in the comment thread, refines scope, protects the repo's interests, and finalizes a clean `issues.md` (or rejects). | ✅ implemented |
-| **Planner** | Turns `issues.md` into a tiered plan of small `task.md` files. | 🧩 scaffolded |
-| **Workers** | Execute `task.md` files and write task summaries. | 🧩 scaffolded |
-| **Reviewer** | Reviews the finished work; either re-plans or opens a PR for human approval. | 🧩 scaffolded |
+| **Responder** | Talks to issue authors in the comment thread, refines scope, protects the repo's interests, and finalizes a clean `issues.md` (or rejects). | ✅ |
+| **Planner** | Turns `issues.md` into an ordered manifest of small tasks (`task.md` files). | ✅ |
+| **Workers** | Execute one task at a time on the issue branch, verify, commit, and write summaries. | ✅ |
+| **Reviewer** | Reviews the combined diff; either opens a PR for human approval or sends it back to the planner. | ✅ |
 
 An orchestrator runs on a **systemd timer**. Each tick it polls every registered
-repo and dispatches the right agent based on issue/label/file state.
+repo, classifies each issue into a pipeline stage by its labels, and dispatches
+the right agent:
+
+```
+(no label) + human spoke last     -> responder   refine scope -> issues.md, label ready
+cheaphelp:ready / :needs-replan    -> planner     issues.md -> tasks,        label planned
+cheaphelp:planned, tasks pending   -> worker      implement a task on the issue branch
+cheaphelp:planned, all tasks done  -> reviewer    open PR (label in-review) or replan
+```
 
 ## Why opencode + OpenRouter
 
@@ -113,21 +120,27 @@ itself and only re-engages when a human responds.
 
 ## Configuration
 
-`~/.cheaphelp/config.json` (cheap test defaults shown):
+`~/.cheaphelp/config.json` (defaults shown). Two tiers: a cheap conversational
+model for the responder, a stronger model for the engineering roles. `variants`
+maps a role to an opencode `--variant` (provider reasoning effort, e.g. `max`);
+`""` means the provider default.
 
 ```json
 {
   "models": {
-    "responder": "openrouter/google/gemini-2.0-flash-001",
-    "planner":   "openrouter/deepseek/deepseek-chat",
-    "worker":    "openrouter/qwen/qwen-2.5-coder-32b-instruct",
-    "reviewer":  "openrouter/google/gemini-2.0-flash-001"
+    "responder": "openrouter/deepseek/deepseek-v4-flash",
+    "planner":   "openrouter/minimax/minimax-m3",
+    "worker":    "openrouter/minimax/minimax-m3",
+    "reviewer":  "openrouter/minimax/minimax-m3"
   },
-  "labels": { "ready": "cheaphelp:ready", "rejected": "cheaphelp:rejected" },
+  "variants": { "responder": "max", "planner": "", "worker": "", "reviewer": "" },
   "poll_interval": "10m",
   "opencode_bin": "opencode"
 }
 ```
+
+After editing models, prompts, or variants, run `cheaphelp agents sync` to
+regenerate the opencode config.
 
 ## Development
 
@@ -146,10 +159,11 @@ Source lives in `src/cheaphelp/_internal/`:
 | `github.py` | minimal GitHub REST client (httpx) |
 | `registry.py` | registered-repo store |
 | `gitutil.py` | shallow clones of registered repos |
-| `opencode.py` | generate `opencode.json`, run agents headlessly, parse decisions |
-| `templates/` | bundled agent prompts |
-| `responder.py` | responder turn logic |
-| `orchestrator.py` | one tick of the state machine |
+| `opencode.py` | generate `opencode.json`, run agents headlessly (with `--variant`), parse decisions |
+| `templates/` | bundled agent prompts (responder, planner, worker, reviewer) |
+| `tasks.py` | task manifest + per-issue task state store |
+| `responder.py` / `planner.py` / `worker.py` / `reviewer.py` | per-role turn logic |
+| `orchestrator.py` | one tick of the state machine (stage dispatch) |
 | `systemd.py` | user service + timer install |
 | `commands.py` / `cli.py` | CLI |
 

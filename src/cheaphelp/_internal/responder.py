@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from cheaphelp._internal.config import Config, Workspace
+from cheaphelp._internal.config import RESPONDER_DONE_LABEL_KEYS, Config, Workspace
 from cheaphelp._internal.github import Comment, GitHubClient, Issue
 
 # Hidden marker embedded in every comment the responder posts, so we can always
@@ -34,7 +34,8 @@ def needs_turn(issue: Issue, comments: list[Comment], bot_login: str, config: Co
     recent activity came from a human (a new issue, or a human reply to us).
     """
     labels = set(issue.labels)
-    if config.labels["ready"] in labels or config.labels["rejected"] in labels:
+    done_labels = {config.labels[key] for key in RESPONDER_DONE_LABEL_KEYS}
+    if labels & done_labels:
         return False
     if not comments:
         # Freshly opened issue with no replies yet.

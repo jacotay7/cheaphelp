@@ -1,8 +1,15 @@
 """Minimal git helpers for maintaining local clones of registered repos.
 
-The responder reads a clone of the target repository so its questions and
-decisions are informed by the actual codebase. Clones live under
-`<workspace>/clones/` and are kept shallow.
+Two clone shapes:
+
+- The **read-only clone** (`ensure_clone`) is shallow and hard-reset to the
+  remote default branch every tick, so the responder and planner always read
+  current code.
+- The **work clone** (`ensure_work_clone`) is a full clone on a persistent
+  per-issue branch that workers commit to across ticks; it is never reset.
+
+The authenticated URL (with the token) is used only for individual fetch/clone/
+push commands and is never stored in git config.
 """
 
 from __future__ import annotations
@@ -56,3 +63,61 @@ def ensure_clone(clone_dir: Path, repo: RepoEntry, *, token: str | None) -> Path
     # Scrub the tokenised remote URL so the secret is not persisted on disk.
     _run(["remote", "set-url", "origin", f"https://github.com/{repo.owner}/{repo.name}.git"], cwd=clone_dir)
     return clone_dir
+
+
+# --- build-stage helpers ---------------------------------------------------
+COMMIT_AUTHOR_NAME = "cheaphelp[bot]"
+COMMIT_AUTHOR_EMAIL = "cheaphelp@users.noreply.github.com"
+
+
+def ensure_work_clone(clone_dir: Path, repo: RepoEntry, *, token: str | None, branch: str) -> Path:
+    """Ensure a full clone exists at `clone_dir`, checked out on `branch`.
+
+    Created from the remote default branch the first time. Existing work on the
+    branch is preserved across ticks (no reset). The remote is stored without the
+    token; fetch/push use an explicit authenticated URL.
+    """
+    base = repo.default_branch or "main"
+    clean_url = f"https://github.com/{repo.owner}/{repo.name}.git"
+
+    if not (clone_dir / ".git").exists():
+        clone_dir.parent.mkdir(parents=True, exist_ok=True)
+        _run(["clone", _authenticated_url(repo.owner, repo.name, token), str(clone_dir)])
+        _run(["remote", "set-url", "origin", clean_url], cwd=clone_dir)
+
+    if _run(["branch", "--list", branch], cwd=clone_dir).strip():
+        _run(["checkout", branch], cwd=clone_dir)
+    else:
+        _run(["checkout", "-B", branch, f"origin/{base}"], cwd=clone_dir)
+    return clone_dir
+
+
+def commit_all(clone_dir: Path, *, message: str) -> bool:
+    """Stage everything and commit. Returns False if there was nothing to commit."""
+    _run(["add", "-A"], cwd=clone_dir)
+    if not _run(["status", "--porcelain"], cwd=clone_dir).strip():
+        return False
+    _run(
+        [
+            "-c", f"user.name={COMMIT_AUTHOR_NAME}",
+            "-c", f"user.email={COMMIT_AUTHOR_EMAIL}",
+            "commit", "-m", message,
+        ],
+        cwd=clone_dir,
+    )
+    return True
+
+
+def push_branch(clone_dir: Path, repo: RepoEntry, *, branch: str, token: str | None) -> None:
+    """Push the current HEAD to `branch` on origin using an ephemeral auth URL."""
+    url = _authenticated_url(repo.owner, repo.name, token)
+    _run(["push", url, f"HEAD:refs/heads/{branch}"], cwd=clone_dir)
+
+
+def diff_against_base(clone_dir: Path, repo: RepoEntry) -> tuple[str, str]:
+    """Return (name-status, full unified diff) of the branch vs the base branch."""
+    base = repo.default_branch or "main"
+    ref = f"origin/{base}...HEAD"
+    name_status = _run(["diff", "--name-status", ref], cwd=clone_dir)
+    full = _run(["diff", ref], cwd=clone_dir)
+    return name_status, full

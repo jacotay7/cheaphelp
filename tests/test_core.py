@@ -6,12 +6,14 @@ from pathlib import Path
 
 import pytest
 
-from cheaphelp._internal import opencode, systemd
+from cheaphelp._internal import opencode, planner, systemd, worker
 from cheaphelp._internal.config import DEFAULT_MODELS, Config, Workspace
 from cheaphelp._internal.env import parse_env, read_env_file, update_env_file
 from cheaphelp._internal.github import Comment, Issue
+from cheaphelp._internal.orchestrator import classify
 from cheaphelp._internal.registry import Registry, RepoEntry, parse_slug
 from cheaphelp._internal.responder import BOT_MARKER, build_prompt, needs_turn
+from cheaphelp._internal.tasks import DONE, TaskStore
 
 
 # --- config / workspace ----------------------------------------------------
@@ -31,6 +33,16 @@ def test_config_merges_defaults() -> None:
     assert cfg.model_for("worker") == "openrouter/custom"
     # Missing roles fall back to defaults.
     assert cfg.model_for("responder") == DEFAULT_MODELS["responder"]
+
+
+def test_variant_for() -> None:
+    cfg = Config()
+    assert cfg.variant_for("responder") == "max"  # default cheap-but-strong tier
+    assert cfg.variant_for("planner") == ""  # provider default
+    # Round-trips through serialization.
+    assert Config.from_dict(cfg.to_dict()).variant_for("responder") == "max"
+    # Override.
+    assert Config.from_dict({"variants": {"planner": "high"}}).variant_for("planner") == "high"
 
 
 # --- env -------------------------------------------------------------------
@@ -129,7 +141,8 @@ def test_build_opencode_config_shape() -> None:
     assert doc["agent"]["responder"]["tools"]["edit"] is False
     assert doc["agent"]["worker"]["tools"]["edit"] is True
     # OpenRouter provider lists models without the opencode prefix.
-    assert "google/gemini-2.5-flash-lite" in doc["provider"]["openrouter"]["models"]
+    assert "deepseek/deepseek-v4-flash" in doc["provider"]["openrouter"]["models"]
+    assert "minimax/minimax-m3" in doc["provider"]["openrouter"]["models"]
 
 
 # --- systemd ---------------------------------------------------------------
@@ -146,3 +159,92 @@ def test_render_units_contains_exec_and_interval(tmp_path: Path) -> None:
     assert "OnUnitActiveSec=15min" in units.timer
     assert "run --once" in units.service
     assert f"CHEAPHELP_HOME={tmp_path}" in units.service
+
+
+# --- planner manifest ------------------------------------------------------
+def test_parse_manifest_valid() -> None:
+    summary, tasks = planner.parse_manifest(
+        {
+            "plan_summary": "do the thing",
+            "tasks": [
+                {"id": "t1", "title": "first", "depends_on": []},
+                {"id": "t2", "title": "second", "depends_on": ["t1"]},
+            ],
+        },
+    )
+    assert summary == "do the thing"
+    assert [t.id for t in tasks] == ["t1", "t2"]
+
+
+@pytest.mark.parametrize(
+    "decision",
+    [
+        {"tasks": []},  # no tasks
+        {"tasks": [{"id": "t1"}]},  # missing title
+        {"tasks": [{"id": "t1", "title": "a"}, {"id": "t1", "title": "b"}]},  # dup id
+        {"tasks": [{"id": "t1", "title": "a", "depends_on": ["tX"]}]},  # bad dep
+    ],
+)
+def test_parse_manifest_rejects_bad(decision: dict) -> None:
+    with pytest.raises(ValueError, match=r"task|depend"):
+        planner.parse_manifest(decision)
+
+
+# --- task store ------------------------------------------------------------
+def test_task_store_lifecycle(tmp_path: Path) -> None:
+    store = TaskStore(tmp_path / "issue-1")
+    _, tasks = planner.parse_manifest(
+        {
+            "tasks": [
+                {"id": "t1", "title": "one", "depends_on": []},
+                {"id": "t2", "title": "two", "depends_on": ["t1"]},
+            ],
+        },
+    )
+    store.materialize(tasks)
+    assert (tmp_path / "issue-1" / "tasks" / "t1.task.md").exists()
+
+    # Only t1 is ready (t2 depends on it).
+    assert store.next_ready().id == "t1"
+    assert not store.all_done()
+
+    store.set_status("t1", DONE, summary="did one")
+    assert store.next_ready().id == "t2"
+    store.set_status("t2", DONE)
+    assert store.all_done()
+    assert store.next_ready() is None
+
+
+def test_task_store_blocked(tmp_path: Path) -> None:
+    store = TaskStore(tmp_path / "issue-2")
+    _, tasks = planner.parse_manifest({"tasks": [{"id": "t1", "title": "x"}]})
+    store.materialize(tasks)
+    store.set_status("t1", "blocked")
+    assert store.is_blocked()
+    assert not store.all_done()
+
+
+def test_worker_branch_name() -> None:
+    assert worker.branch_name(42) == "cheaphelp/issue-42"
+
+
+# --- orchestrator stage classification ------------------------------------
+def _issue_with(labels: list[str]) -> Issue:
+    return Issue(number=1, title="t", body="b", state="open", labels=labels, user="u", html_url="")
+
+
+def test_classify_stages() -> None:
+    cfg = Config()
+    lab = cfg.labels
+    bot = "bot"
+    # Fresh issue, human opened it -> responder.
+    assert classify(_issue_with([]), [], bot, cfg) == "responder"
+    # Ready / needs-replan -> planner.
+    assert classify(_issue_with([lab["ready"]]), [], bot, cfg) == "planner"
+    assert classify(_issue_with([lab["needs_replan"]]), [], bot, cfg) == "planner"
+    # Planned -> build.
+    assert classify(_issue_with([lab["planned"]]), [], bot, cfg) == "build"
+    # Terminal / waiting -> nothing.
+    assert classify(_issue_with([lab["rejected"]]), [], bot, cfg) is None
+    assert classify(_issue_with([lab["in_review"]]), [], bot, cfg) is None
+    assert classify(_issue_with([lab["needs_human"]]), [], bot, cfg) is None

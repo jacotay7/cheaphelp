@@ -21,22 +21,49 @@ CONFIG_VERSION = 1
 """Bump when the on-disk config layout changes in a breaking way."""
 
 DEFAULT_MODELS: dict[str, str] = {
-    # Cheap OpenRouter test tier (verified live against OpenRouter, 2026-06).
-    # Swap for frontier models once the pipeline works end-to-end. Strings are
-    # opencode model ids: openrouter/<openrouter-model-id>.
-    "responder": "openrouter/google/gemini-2.5-flash-lite",
-    "planner": "openrouter/deepseek/deepseek-chat",
-    "worker": "openrouter/qwen/qwen-2.5-coder-32b-instruct",
-    "reviewer": "openrouter/google/gemini-2.5-flash-lite",
+    # Two-tier OpenRouter setup (verified live, 2026-06). Strings are opencode
+    # model ids: openrouter/<openrouter-model-id>.
+    #   - cheap tier  (deepseek-v4-flash): high-volume conversational work.
+    #   - better tier (minimax-m3):        planning, implementation, review.
+    "responder": "openrouter/deepseek/deepseek-v4-flash",
+    "planner": "openrouter/minimax/minimax-m3",
+    "worker": "openrouter/minimax/minimax-m3",
+    "reviewer": "openrouter/minimax/minimax-m3",
 }
 
 DEFAULT_LABELS: dict[str, str] = {
-    "ready": "cheaphelp:ready",
-    "rejected": "cheaphelp:rejected",
-    "in_progress": "cheaphelp:in-progress",
+    "ready": "cheaphelp:ready",  # responder finalized; planner's input
+    "rejected": "cheaphelp:rejected",  # responder declined
+    "planned": "cheaphelp:planned",  # planner produced tasks; worker's input
+    "in_progress": "cheaphelp:in-progress",  # worker is executing tasks
+    "in_review": "cheaphelp:in-review",  # reviewer opened a PR; awaiting human
+    "needs_replan": "cheaphelp:needs-replan",  # reviewer sent it back to the planner
+    "needs_human": "cheaphelp:needs-human",  # stuck; a person should look
 }
 
+# Labels that mean "the responder should leave this issue alone" — it has moved
+# past the conversation stage into the build pipeline (or was rejected).
+RESPONDER_DONE_LABEL_KEYS = (
+    "ready",
+    "rejected",
+    "planned",
+    "in_progress",
+    "in_review",
+    "needs_replan",
+    "needs_human",
+)
+
 DEFAULT_POLL_INTERVAL = "10m"
+
+# Per-role opencode model "variant" (provider-specific reasoning effort, passed
+# as `--variant`). Empty string = the provider's default. `deepseek-v4-flash`
+# with the `max` variant is the "deepseek-v4-flash-max" cheap-but-strong tier.
+DEFAULT_VARIANTS: dict[str, str] = {
+    "responder": "max",
+    "planner": "",
+    "worker": "",
+    "reviewer": "",
+}
 
 
 def default_home() -> Path:
@@ -53,6 +80,7 @@ class Config:
 
     version: int = CONFIG_VERSION
     models: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_MODELS))
+    variants: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_VARIANTS))
     labels: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_LABELS))
     poll_interval: str = DEFAULT_POLL_INTERVAL
     opencode_bin: str = "opencode"
@@ -63,6 +91,7 @@ class Config:
         return cls(
             version=int(data.get("version", CONFIG_VERSION)),
             models={**DEFAULT_MODELS, **(data.get("models") or {})},
+            variants={**DEFAULT_VARIANTS, **(data.get("variants") or {})},
             labels={**DEFAULT_LABELS, **(data.get("labels") or {})},
             poll_interval=str(data.get("poll_interval", DEFAULT_POLL_INTERVAL)),
             opencode_bin=str(data.get("opencode_bin", "opencode")),
@@ -73,6 +102,7 @@ class Config:
         return {
             "version": self.version,
             "models": self.models,
+            "variants": self.variants,
             "labels": self.labels,
             "poll_interval": self.poll_interval,
             "opencode_bin": self.opencode_bin,
@@ -84,6 +114,10 @@ class Config:
             return self.models[role]
         except KeyError as exc:  # pragma: no cover - defensive
             raise KeyError(f"No model configured for role {role!r}") from exc
+
+    def variant_for(self, role: str) -> str:
+        """Return the opencode `--variant` for a role, or "" for the default."""
+        return (self.variants or {}).get(role, "") or ""
 
 
 class Workspace:
@@ -169,9 +203,17 @@ class Workspace:
         )
 
     def clone_path(self, owner: str, repo: str) -> Path:
-        """Local path where a registered repository is cloned."""
+        """Local path of the shared read-only clone for a repository."""
         return self.clones_dir / f"{owner}__{repo}"
 
+    def work_clone_path(self, owner: str, repo: str, number: int) -> Path:
+        """Local path of the persistent build clone for one issue."""
+        return self.clones_dir / f"{owner}__{repo}__issue-{number}"
+
     def issue_state_path(self, owner: str, repo: str, number: int) -> Path:
-        """Path to the per-issue state file."""
+        """Path to the per-issue state marker file."""
         return self.state_dir / f"{owner}__{repo}" / f"issue-{number}.json"
+
+    def issue_dir(self, owner: str, repo: str, number: int) -> Path:
+        """Directory holding an issue's spec, plan and tasks."""
+        return self.state_dir / f"{owner}__{repo}" / f"issue-{number}"

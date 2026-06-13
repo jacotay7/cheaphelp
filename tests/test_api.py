@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections import defaultdict
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -96,24 +95,19 @@ def _fixture_inventory() -> Inventory:
         return Inventory.parse_sphinx(file)
 
 
-# NOTE: The upstream copier-uv template ships two more API-surface checks here:
+# NOTE: The upstream copier-uv template ships three more API-surface checks here:
 #   - test_exposed_objects: every public object in `_internal` must be re-exported
 #     in `cheaphelp.__all__`.
 #   - test_no_module_docstrings_in_internal_api: internal modules must have no
 #     module docstrings.
+#   - test_unique_names: every public object name must be unique across the whole
+#     internal API.
 # Those encode a *library* convention (a thin public package re-exporting a flat
 # internal API). cheaphelp is an *application* with many genuinely-internal
-# modules that we do not want to surface as a public API, and whose module
-# docstrings are useful documentation. The checks were intentionally removed.
-
-
-def test_unique_names(modulelevel_internal_objects: list[griffe.Object | griffe.Alias]) -> None:
-    """All internal objects have unique names."""
-    names_to_paths = defaultdict(list)
-    for obj in modulelevel_internal_objects:
-        names_to_paths[obj.name].append(obj.path)
-    non_unique = [paths for paths in names_to_paths.values() if len(paths) > 1]
-    assert not non_unique, "Non-unique names:\n" + "\n".join(str(paths) for paths in non_unique)
+# modules that we do not want to surface as a flat public API; per-module names
+# like `build_prompt` / `apply_decision` recurring across role modules
+# (responder, planner, worker, reviewer) is intentional and clearer. The module
+# docstrings are also useful documentation. These checks were intentionally removed.
 
 
 def test_single_locations(public_api: griffe.Module) -> None:
