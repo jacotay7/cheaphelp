@@ -71,6 +71,7 @@ ignore = [
     "T201",  # Print statement
 ]
 "tests/**.py" = [
+    "ARG001",  # Unused function argument (monkeypatch stubs mirror real signatures)
     "ARG005",  # Unused lambda argument
     "FBT001",  # Boolean positional arg in function definition
     "PLR2004",  # Magic value used in comparison
