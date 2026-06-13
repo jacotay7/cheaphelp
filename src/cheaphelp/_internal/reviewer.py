@@ -61,8 +61,7 @@ def build_prompt(issue_md: str, name_status: str, full_diff: str, summaries: str
             "",
             "---",
             "",
-            "Review the combined result and decide, following your output protocol "
-            "(a single json block).",
+            "Review the combined result and decide, following your output protocol (a single json block).",
         ],
     )
 
@@ -111,8 +110,12 @@ def apply_review(
         )
         try:
             pr = gh.create_pull_request(
-                repo.owner, repo.name,
-                title=title, head=branch, base=repo.default_branch or "main", body=body,
+                repo.owner,
+                repo.name,
+                title=title,
+                head=branch,
+                base=repo.default_branch or "main",
+                body=body,
             )
         except Exception as exc:  # noqa: BLE001
             return ReviewResult(number=number, decision=choice, error=str(exc))
@@ -120,23 +123,33 @@ def apply_review(
         # author (common when the bot is the repo owner); the @mention above
         # still notifies them in that case.
         gh.request_reviewers(repo.owner, repo.name, int(pr.get("number", 0)), reviewers)
-        gh.ensure_label(repo.owner, repo.name, config.labels["in_review"], color="5319e7",
-                        description="cheaphelp: PR open, awaiting human review")
+        gh.ensure_label(
+            repo.owner,
+            repo.name,
+            config.labels["in_review"],
+            color="5319e7",
+            description="cheaphelp: PR open, awaiting human review",
+        )
         gh.add_labels(repo.owner, repo.name, number, [config.labels["in_review"]])
         gh.remove_label(repo.owner, repo.name, number, config.labels["planned"])
-        gh.create_comment(repo.owner, repo.name, number,
-                          f"{BOT_MARKER}\n\nOpened a pull request for review: {pr.get('html_url', '')}")
+        gh.create_comment(
+            repo.owner, repo.name, number, f"{BOT_MARKER}\n\nOpened a pull request for review: {pr.get('html_url', '')}"
+        )
         return ReviewResult(number=number, decision=choice, pr_url=pr.get("html_url"))
 
     # replan
     notes = str(decision.get("replan_notes") or "").strip()
     (issue_dir / "replan.md").write_text(notes + "\n", encoding="utf-8")
-    gh.ensure_label(repo.owner, repo.name, config.labels["needs_replan"], color="fbca04",
-                    description="cheaphelp: reviewer sent back to planner")
+    gh.ensure_label(
+        repo.owner,
+        repo.name,
+        config.labels["needs_replan"],
+        color="fbca04",
+        description="cheaphelp: reviewer sent back to planner",
+    )
     gh.add_labels(repo.owner, repo.name, number, [config.labels["needs_replan"]])
     gh.remove_label(repo.owner, repo.name, number, config.labels["planned"])
-    gh.create_comment(repo.owner, repo.name, number,
-                      f"{BOT_MARKER}\n\nSending this back to planning:\n\n{notes}")
+    gh.create_comment(repo.owner, repo.name, number, f"{BOT_MARKER}\n\nSending this back to planning:\n\n{notes}")
     return ReviewResult(number=number, decision="replan")
 
 

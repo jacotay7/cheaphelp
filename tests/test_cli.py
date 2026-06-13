@@ -64,7 +64,7 @@ def test_repo_list_json(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
     ws.save_config(Config())  # make Workspace.exists() return True
     reg = Registry(ws.registry_path)
     reg.add(
-        RepoEntry(owner="octocat", name="hello", default_branch="main", enabled=True)
+        RepoEntry(owner="octocat", name="hello", default_branch="main", enabled=True),
     )
     reg.add(RepoEntry(owner="octocat", name="bye", default_branch="dev", enabled=False))
 

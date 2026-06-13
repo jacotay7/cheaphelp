@@ -154,15 +154,14 @@ def apply_plan(
     write_plan_md(issue_dir, summary, tasks)
 
     verb = f"{len(new_tasks)} corrective task(s) added" if done else f"{len(tasks)} task(s)"
-    body = (
-        f"{BOT_MARKER}\n\n**Plan ready — {verb}.**\n\n"
-        f"{summary}\n\n"
-        + "\n".join(f"- `{t.id}` {t.title}" + (" ✓" if t.status == DONE else "") for t in tasks)
+    body = f"{BOT_MARKER}\n\n**Plan ready — {verb}.**\n\n{summary}\n\n" + "\n".join(
+        f"- `{t.id}` {t.title}" + (" ✓" if t.status == DONE else "") for t in tasks
     )
     gh.create_comment(owner, repo, number, body)
 
-    gh.ensure_label(owner, repo, config.labels["planned"], color="1d76db",
-                    description="cheaphelp: planned, ready for workers")
+    gh.ensure_label(
+        owner, repo, config.labels["planned"], color="1d76db", description="cheaphelp: planned, ready for workers"
+    )
     gh.add_labels(owner, repo, number, [config.labels["planned"]])
     # Move out of the planner queue.
     gh.remove_label(owner, repo, number, config.labels["ready"])
