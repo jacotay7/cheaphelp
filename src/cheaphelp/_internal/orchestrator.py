@@ -219,7 +219,10 @@ def _run_build(gh, workspace, config, repo, issue, token, log, report) -> None: 
     )
     gh.add_labels(repo.owner, repo.name, number, [config.labels["in_progress"]])
 
-    # Run every currently-ready task; a linear chain finishes in one tick.
+    # Run every currently-ready task; a linear chain finishes in one tick. When
+    # max_tasks_per_tick is set, stop after that many tasks and resume the rest
+    # on the next tick (task state is persisted, so this is safe).
+    max_tasks = config.max_tasks_per_tick
     ran = 0
     while ran < len(tasks):
         task = store.next_ready()
@@ -232,6 +235,10 @@ def _run_build(gh, workspace, config, repo, issue, token, log, report) -> None: 
         log(f"  > {repo.slug}#{number}: worker {task.id} -> {res.status}{flag}")
         report.actions.append(f"#{number}: worker {task.id} {res.status}")
         if res.status != "done":
+            break
+        if max_tasks > 0 and ran >= max_tasks and store.next_ready() is not None:
+            log(f"  · {repo.slug}#{number}: ran {ran} task(s) this tick; deferring the rest")
+            report.actions.append(f"#{number}: deferred remaining tasks")
             break
 
     tasks = store.load()

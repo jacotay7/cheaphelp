@@ -109,6 +109,10 @@ class Config:
     # Cap on issues processed per repo per tick (0 = unlimited). A CLI
     # `--max-issues` flag overrides this when > 0.
     max_issues_per_tick: int = 0
+    # Cap on worker tasks run per issue per tick (0 = unlimited). Keeps a single
+    # tick bounded/predictable; remaining tasks resume on the next tick since
+    # task state is persisted.
+    max_tasks_per_tick: int = 0
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Config:
@@ -124,6 +128,7 @@ class Config:
             opencode_bin=str(data.get("opencode_bin", "opencode")),
             agent_timeout=float(data.get("agent_timeout", DEFAULT_AGENT_TIMEOUT)),
             max_issues_per_tick=int(data.get("max_issues_per_tick", 0)),
+            max_tasks_per_tick=int(data.get("max_tasks_per_tick", 0)),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -139,6 +144,7 @@ class Config:
             "opencode_bin": self.opencode_bin,
             "agent_timeout": self.agent_timeout,
             "max_issues_per_tick": self.max_issues_per_tick,
+            "max_tasks_per_tick": self.max_tasks_per_tick,
         }
 
     def model_for(self, role: str) -> str:

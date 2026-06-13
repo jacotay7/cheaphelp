@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from cheaphelp._internal import opencode, planner, systemd, worker
+from cheaphelp._internal import gitutil, opencode, orchestrator, planner, systemd, worker
 from cheaphelp._internal.config import DEFAULT_AGENT_TIMEOUT, DEFAULT_MODELS, Config, Workspace
 from cheaphelp._internal.env import parse_env, read_env_file, update_env_file
 from cheaphelp._internal.github import Comment, Issue
@@ -70,6 +70,18 @@ def test_max_issues_per_tick_default_and_roundtrip() -> None:
     assert Config.from_dict({"max_issues_per_tick": "7"}).max_issues_per_tick == 7
 
 
+def test_max_tasks_per_tick_default_and_roundtrip() -> None:
+    # Default when constructed with no args / absent from the on-disk dict.
+    assert Config().max_tasks_per_tick == 0
+    assert Config.from_dict({}).max_tasks_per_tick == 0
+    # User override is honoured by from_dict and preserved by to_dict.
+    cfg = Config.from_dict({"max_tasks_per_tick": 3})
+    assert cfg.max_tasks_per_tick == 3
+    assert Config.from_dict(cfg.to_dict()).max_tasks_per_tick == 3
+    # String values are coerced via int(...).
+    assert Config.from_dict({"max_tasks_per_tick": "2"}).max_tasks_per_tick == 2
+
+
 class _FakeGitHub:
     """Minimal stand-in for GitHubClient used by _process_repo tests."""
 
@@ -87,6 +99,14 @@ class _FakeGitHub:
 
     def authenticated_login(self) -> str:
         return "mybot"
+
+
+class _BuildFakeGH:
+    """Minimal GitHub stand-in for _run_build label calls."""
+
+    def ensure_label(self, *_args: object, **_kwargs: object) -> None: ...
+    def add_labels(self, *_args: object, **_kwargs: object) -> None: ...
+    def remove_label(self, *_args: object, **_kwargs: object) -> None: ...
 
 
 def test_process_repo_caps_work_to_max_issues(
@@ -142,6 +162,42 @@ def test_process_repo_caps_work_to_max_issues(
         max_issues=10,
     )
     assert len(report.actions) == 5
+
+
+def test_run_build_caps_tasks_per_tick(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    repo = RepoEntry(owner="octocat", name="hello")
+    issue = Issue(number=1, title="t", body="b", state="open", labels=[], user="u", html_url="")
+    issue_dir = ws.issue_dir(repo.owner, repo.name, issue.number)
+    store = TaskStore(issue_dir)
+    _, tasks = planner.parse_manifest(
+        {"tasks": [{"id": "t1", "title": "one"}, {"id": "t2", "title": "two"}, {"id": "t3", "title": "three"}]},
+    )
+    store.materialize(tasks)
+
+    # Neutralise git + count worker invocations; each call marks its task done.
+    monkeypatch.setattr(gitutil, "ensure_work_clone", lambda *_a, **_k: None)
+    calls: list[str] = []
+
+    def fake_run_task(_ws, _cfg, _repo, number, task, _work_dir, *, token):  # noqa: ANN001, ANN202
+        calls.append(task.id)
+        TaskStore(ws.issue_dir(repo.owner, repo.name, number)).set_status(task.id, DONE, summary="ok")
+        return worker.WorkResult(task_id=task.id, status=DONE, committed=True)
+
+    monkeypatch.setattr(worker, "run_task", fake_run_task)
+
+    report = orchestrator.RepoReport(slug=repo.slug)
+    cfg = Config.from_dict({"max_tasks_per_tick": 2})
+    orchestrator._run_build(_BuildFakeGH(), ws, cfg, repo, issue, "token", lambda _m: None, report)
+
+    # Only two of the three tasks ran this tick; the third remains pending.
+    assert calls == ["t1", "t2"]
+    assert not store.all_done()
+    assert store.next_ready() is not None
 
 
 def test_variant_for() -> None:
