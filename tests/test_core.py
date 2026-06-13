@@ -436,22 +436,13 @@ def test_worker_branch_name() -> None:
     assert worker.branch_name(42) == "cheaphelp/issue-42"
 
 
-def test_worker_build_prompt_includes_gate_commands() -> None:
+def test_worker_build_prompt_is_task_scoped_without_full_gate() -> None:
     task = worker.Task(id="t1", title="Do the thing")
-    prompt = worker.build_prompt(
-        task,
-        "spec",
-        autofix="ruff check --fix .",
-        checks="ruff check . && pytest -q",
-    )
-    assert "Quality gate" in prompt
-    assert "ruff check --fix ." in prompt
-    assert "ruff check . && pytest -q" in prompt
-    assert "Do not report `done`" in prompt
-
-
-def test_worker_build_prompt_omits_gate_when_unset() -> None:
-    prompt = worker.build_prompt(worker.Task(id="t1", title="Do the thing"), "spec")
+    prompt = worker.build_prompt(task, "the spec")
+    assert "Do the thing" in prompt
+    assert "the spec" in prompt
+    # The worker is not handed the full quality gate to run per task; that runs
+    # once at the review step in the orchestrator.
     assert "Quality gate" not in prompt
 
 
