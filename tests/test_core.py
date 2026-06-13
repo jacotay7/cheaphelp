@@ -103,7 +103,7 @@ def test_process_repo_caps_work_to_max_issues(
 
     # All five issues classify to "responder"; cap to 2.
     report = _process_repo(
-        fake_gh,
+        fake_gh,  # ty: ignore[invalid-argument-type]
         ws,
         Config(),
         repo,
@@ -118,7 +118,7 @@ def test_process_repo_caps_work_to_max_issues(
 
     # Default (0) = unlimited: all five are processed.
     report = _process_repo(
-        fake_gh,
+        fake_gh,  # ty: ignore[invalid-argument-type]
         ws,
         Config(),
         repo,
@@ -131,7 +131,7 @@ def test_process_repo_caps_work_to_max_issues(
 
     # Cap larger than the work list does not underflow.
     report = _process_repo(
-        fake_gh,
+        fake_gh,  # ty: ignore[invalid-argument-type]
         ws,
         Config(),
         repo,
