@@ -154,6 +154,14 @@ class GitHubClient:
         data = self._request("GET", f"/repos/{owner}/{repo}/issues/{number}")
         return Issue.from_payload(data)
 
+    def create_issue(self, owner: str, repo: str, *, title: str, body: str = "") -> Issue:
+        data = self._request(
+            "POST",
+            f"/repos/{owner}/{repo}/issues",
+            json={"title": title, "body": body},
+        )
+        return Issue.from_payload(data)
+
     def list_issue_comments(self, owner: str, repo: str, number: int) -> list[Comment]:
         raw = self._paginate(f"/repos/{owner}/{repo}/issues/{number}/comments")
         return [Comment.from_payload(item) for item in raw]

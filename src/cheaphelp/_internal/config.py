@@ -21,12 +21,13 @@ CONFIG_VERSION = 1
 """Bump when the on-disk config layout changes in a breaking way."""
 
 DEFAULT_MODELS: dict[str, str] = {
-    # Cheap OpenRouter test tier. Swap these for frontier models once the
-    # pipeline works end-to-end. Strings are opencode model ids: openrouter/<id>.
-    "responder": "openrouter/google/gemini-2.0-flash-001",
+    # Cheap OpenRouter test tier (verified live against OpenRouter, 2026-06).
+    # Swap for frontier models once the pipeline works end-to-end. Strings are
+    # opencode model ids: openrouter/<openrouter-model-id>.
+    "responder": "openrouter/google/gemini-2.5-flash-lite",
     "planner": "openrouter/deepseek/deepseek-chat",
     "worker": "openrouter/qwen/qwen-2.5-coder-32b-instruct",
-    "reviewer": "openrouter/google/gemini-2.0-flash-001",
+    "reviewer": "openrouter/google/gemini-2.5-flash-lite",
 }
 
 DEFAULT_LABELS: dict[str, str] = {

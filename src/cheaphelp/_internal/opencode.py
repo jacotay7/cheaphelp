@@ -47,9 +47,31 @@ class AgentResult:
         return self.returncode == 0
 
 
+# Common locations the opencode installer drops the binary that are not always
+# on a non-interactive shell's PATH.
+_OPENCODE_FALLBACK_PATHS = (
+    "~/.opencode/bin/opencode",
+    "~/.local/bin/opencode",
+)
+
+
 def find_opencode(config: Config) -> str | None:
-    """Return the path to the opencode binary, or None if not on PATH."""
-    return shutil.which(config.opencode_bin)
+    """Return the path to the opencode binary.
+
+    Tries the configured name on PATH first (so an absolute path or a custom
+    name works), then a few well-known install locations. Returns None if not
+    found anywhere.
+    """
+    found = shutil.which(config.opencode_bin)
+    if found:
+        return found
+    # Only probe fallbacks for the default name; a custom name is intentional.
+    if config.opencode_bin == "opencode":
+        for candidate in _OPENCODE_FALLBACK_PATHS:
+            path = Path(candidate).expanduser()
+            if path.is_file() and os.access(path, os.X_OK):
+                return str(path)
+    return None
 
 
 def _strip_prefix(model: str) -> str:

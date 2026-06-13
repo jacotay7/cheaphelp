@@ -129,7 +129,7 @@ def test_build_opencode_config_shape() -> None:
     assert doc["agent"]["responder"]["tools"]["edit"] is False
     assert doc["agent"]["worker"]["tools"]["edit"] is True
     # OpenRouter provider lists models without the opencode prefix.
-    assert "google/gemini-2.0-flash-001" in doc["provider"]["openrouter"]["models"]
+    assert "google/gemini-2.5-flash-lite" in doc["provider"]["openrouter"]["models"]
 
 
 # --- systemd ---------------------------------------------------------------
