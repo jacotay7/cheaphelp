@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime
 import json
 import re
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -130,7 +131,7 @@ def test_run_writes_daily_log_file(
     """`cheaphelp run` writes a per-day log file mirroring every console line."""
     ws = _setup_workspace(tmp_path)
 
-    def fake_tick(workspace: Workspace, *, dry_run: bool, log) -> SimpleNamespace:  # noqa: ARG001
+    def fake_tick(workspace: Workspace, *, dry_run: bool, log: Callable[[str], None]) -> SimpleNamespace:  # noqa: ARG001
         log("hello-from-stub")
         log("second line")
         return SimpleNamespace(error=None, total_turns=0, repos=[])
@@ -146,7 +147,7 @@ def test_run_writes_daily_log_file(
     assert "second line" in captured
     assert "Done." in captured
 
-    expected = ws.logs_dir / f"run-{datetime.date.today().isoformat()}.log"
+    expected = ws.logs_dir / f"run-{datetime.datetime.now(datetime.timezone.utc).date().isoformat()}.log"
     assert expected.exists()
     assert expected.is_file()
     contents = expected.read_text(encoding="utf-8")
@@ -178,7 +179,7 @@ def test_run_appends_within_same_day(
     """Running twice on the same day appends a second header + body to the daily log file."""
     ws = _setup_workspace(tmp_path)
 
-    def fake_tick(workspace: Workspace, *, dry_run: bool, log) -> SimpleNamespace:  # noqa: ARG001
+    def fake_tick(workspace: Workspace, *, dry_run: bool, log: Callable[[str], None]) -> SimpleNamespace:  # noqa: ARG001
         log("hello-from-stub")
         return SimpleNamespace(error=None, total_turns=0, repos=[])
 
@@ -188,7 +189,7 @@ def test_run_appends_within_same_day(
     assert rc1 == 0
     capsys.readouterr()  # discard first invocation's stdout
 
-    log_path = ws.logs_dir / f"run-{datetime.date.today().isoformat()}.log"
+    log_path = ws.logs_dir / f"run-{datetime.datetime.now(datetime.timezone.utc).date().isoformat()}.log"
     assert log_path.exists()
     first_size = log_path.stat().st_size
 
@@ -210,11 +211,11 @@ def test_run_swallows_log_write_errors(
 ) -> None:
     """A log file that can't be written (e.g. path blocked by a directory) must not crash the tick."""
     ws = _setup_workspace(tmp_path)
-    blocker = ws.logs_dir / f"run-{datetime.date.today().isoformat()}.log"
+    blocker = ws.logs_dir / f"run-{datetime.datetime.now(datetime.timezone.utc).date().isoformat()}.log"
     blocker.mkdir()  # opening this path for writing raises IsADirectoryError (an OSError)
     try:
 
-        def fake_tick(workspace: Workspace, *, dry_run: bool, log) -> SimpleNamespace:  # noqa: ARG001
+        def fake_tick(workspace: Workspace, *, dry_run: bool, log: Callable[[str], None]) -> SimpleNamespace:  # noqa: ARG001
             log("would-be-logged")
             return SimpleNamespace(error=None, total_turns=0, repos=[])
 
