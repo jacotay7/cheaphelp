@@ -145,6 +145,35 @@ def test_build_opencode_config_shape() -> None:
     assert "minimax/minimax-m3" in doc["provider"]["openrouter"]["models"]
 
 
+def test_sandbox_permissions_default_on() -> None:
+    doc = opencode.build_opencode_config(Config())
+    worker = doc["agent"]["worker"]["permission"]
+    reader = doc["agent"]["planner"]["permission"]
+    # Confined to the working directory, no network tools.
+    assert worker["external_directory"] == "deny"
+    assert reader["external_directory"] == "deny"
+    assert reader["webfetch"] == "deny"
+    # Worker: allow-by-default bash but dangerous commands denied; readers deny-default.
+    assert worker["bash"]["*"] == "allow"
+    assert worker["bash"]["sudo*"] == "deny"
+    assert worker["bash"]["git push*"] == "deny"
+    assert reader["bash"]["*"] == "deny"
+    assert reader["bash"]["git status*"] == "allow"
+    # Readers cannot edit; worker can.
+    assert reader["edit"] == "deny"
+    assert worker["edit"] == "allow"
+
+
+def test_sandbox_can_be_disabled() -> None:
+    cfg = Config.from_dict(
+        {"sandbox": {"confine_to_workdir": False, "restrict_bash": False, "no_network_tools": False}},
+    )
+    perm = opencode.build_opencode_config(cfg)["agent"]["worker"]["permission"]
+    assert perm["bash"] == "allow"
+    assert "external_directory" not in perm
+    assert "webfetch" not in perm
+
+
 # --- systemd ---------------------------------------------------------------
 def test_normalize_interval() -> None:
     assert systemd.normalize_interval("10m") == "10min"

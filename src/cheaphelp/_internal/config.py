@@ -65,6 +65,21 @@ DEFAULT_VARIANTS: dict[str, str] = {
     "reviewer": "",
 }
 
+# Sandboxing knobs for the agents. These drive opencode's permission system
+# (see opencode.py). They are guardrails / defence-in-depth, not a true OS
+# sandbox — for strong isolation run the whole thing under a container or a
+# low-privilege user (see the README).
+DEFAULT_SANDBOX: dict[str, bool] = {
+    # Confine the edit/read tools to the working directory (the clone): sets
+    # opencode's `external_directory` permission to "deny".
+    "confine_to_workdir": True,
+    # Apply the curated bash allow/deny policy (readers: deny-by-default with a
+    # read-only allowlist; worker: allow with a dangerous-command denylist).
+    "restrict_bash": True,
+    # Disallow web access (webfetch/websearch) for all agents.
+    "no_network_tools": True,
+}
+
 
 def default_home() -> Path:
     """Return the workspace directory, honouring `CHEAPHELP_HOME`."""
@@ -82,6 +97,7 @@ class Config:
     models: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_MODELS))
     variants: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_VARIANTS))
     labels: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_LABELS))
+    sandbox: dict[str, bool] = field(default_factory=lambda: dict(DEFAULT_SANDBOX))
     poll_interval: str = DEFAULT_POLL_INTERVAL
     opencode_bin: str = "opencode"
 
@@ -93,6 +109,7 @@ class Config:
             models={**DEFAULT_MODELS, **(data.get("models") or {})},
             variants={**DEFAULT_VARIANTS, **(data.get("variants") or {})},
             labels={**DEFAULT_LABELS, **(data.get("labels") or {})},
+            sandbox={**DEFAULT_SANDBOX, **(data.get("sandbox") or {})},
             poll_interval=str(data.get("poll_interval", DEFAULT_POLL_INTERVAL)),
             opencode_bin=str(data.get("opencode_bin", "opencode")),
         )
@@ -104,6 +121,7 @@ class Config:
             "models": self.models,
             "variants": self.variants,
             "labels": self.labels,
+            "sandbox": self.sandbox,
             "poll_interval": self.poll_interval,
             "opencode_bin": self.opencode_bin,
         }

@@ -32,6 +32,78 @@ _WRITER_ROLES = {"worker"}
 # Mirrors what opencode expects: model ids are "openrouter/<openrouter-model-id>".
 _OPENROUTER_PREFIX = "openrouter/"
 
+# --- bash sandbox policies -------------------------------------------------
+# opencode matches bash commands against these glob patterns; the LAST matching
+# rule wins, so the broad "*" rule comes first. These are guardrails, not a true
+# sandbox: a determined agent can evade pattern matching (e.g. via a script
+# interpreter). For real isolation run under a container or low-privilege user.
+
+# Readers (responder, planner, reviewer): deny by default, allow read-only probes.
+# They mostly use opencode's built-in read/grep/glob tools, which are separate.
+_READER_BASH: dict[str, str] = {
+    "*": "deny",
+    "ls*": "allow",
+    "cat *": "allow",
+    "head *": "allow",
+    "tail *": "allow",
+    "wc *": "allow",
+    "grep *": "allow",
+    "rg *": "allow",
+    "find *": "allow",
+    "tree*": "allow",
+    "pwd": "allow",
+    "echo *": "allow",
+    "git status*": "allow",
+    "git log*": "allow",
+    "git diff*": "allow",
+    "git show*": "allow",
+    "git branch*": "allow",
+    "git ls-files*": "allow",
+}
+
+# Worker (writer): allow by default so it can build and run tests, but deny
+# clearly dangerous or out-of-scope commands. We do git push ourselves, so the
+# agent is not allowed to touch remotes.
+_WORKER_BASH: dict[str, str] = {
+    "*": "allow",
+    "sudo*": "deny",
+    "su *": "deny",
+    "rm -rf /*": "deny",
+    "rm -rf ~*": "deny",
+    "rm -fr /*": "deny",
+    "shutdown*": "deny",
+    "reboot*": "deny",
+    "halt*": "deny",
+    "mkfs*": "deny",
+    "dd *": "deny",
+    "chmod -R *": "deny",
+    "chown -R *": "deny",
+    "ssh *": "deny",
+    "scp *": "deny",
+    "curl *|*": "deny",
+    "wget *|*": "deny",
+    "git push*": "deny",
+    "git remote*": "deny",
+    "crontab*": "deny",
+}
+
+
+def _permission_for(role: str, sandbox: dict[str, bool]) -> dict:
+    """Build the opencode `permission` block for an agent from sandbox config."""
+    is_writer = role in _WRITER_ROLES
+    perm: dict = {"edit": "allow" if is_writer else "deny"}
+    if sandbox.get("no_network_tools", True):
+        perm["webfetch"] = "deny"
+        perm["websearch"] = "deny"
+    if sandbox.get("confine_to_workdir", True):
+        # Keep file read/edit tools inside the working directory (the clone).
+        perm["external_directory"] = "deny"
+    if sandbox.get("restrict_bash", True):
+        perm["bash"] = dict(_WORKER_BASH if is_writer else _READER_BASH)
+    else:
+        perm["bash"] = "allow"
+    return perm
+
 
 @dataclass
 class AgentResult:
@@ -137,13 +209,9 @@ def build_opencode_config(config: Config, prompts: dict[str, str] | None = None)
                 "write": is_writer,
                 "edit": is_writer,
             },
-            # Explicit permissions so headless `run` never blocks on a prompt.
-            # Writers may edit and run shell commands; readers may not edit.
-            "permission": {
-                "edit": "allow" if is_writer else "deny",
-                "bash": "allow",
-                "webfetch": "allow",
-            },
+            # Explicit permissions so headless `run` never blocks on a prompt,
+            # and the sandbox policy confines/limits what each agent can do.
+            "permission": _permission_for(role, config.sandbox),
         }
 
     return {
