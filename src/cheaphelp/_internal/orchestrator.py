@@ -97,7 +97,12 @@ def _run_planner(gh, workspace, config, repo, issue, cwd, log, report) -> None: 
         return
     replan_path = issue_dir / "replan.md"
     replan_notes = replan_path.read_text(encoding="utf-8") if replan_path.exists() else ""
-    prompt = planner.build_prompt(spec_path.read_text(encoding="utf-8"), replan_notes=replan_notes)
+    existing_tasks = TaskStore(issue_dir).load()
+    prompt = planner.build_prompt(
+        spec_path.read_text(encoding="utf-8"),
+        replan_notes=replan_notes,
+        existing_tasks=existing_tasks,
+    )
     result = opencode.run_agent(workspace, config, "planner", prompt, cwd=cwd)
     if result.decision is None:
         log(f"  ! {repo.slug}#{issue.number}: planner produced no decision (rc={result.returncode})")

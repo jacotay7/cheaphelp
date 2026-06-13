@@ -234,6 +234,42 @@ def test_parse_manifest_rejects_bad(decision: dict) -> None:
         planner.parse_manifest(decision)
 
 
+def test_parse_manifest_known_ids_allows_external_dep() -> None:
+    # A corrective task may depend on an already-done task id from a prior round.
+    _, tasks = planner.parse_manifest(
+        {"tasks": [{"id": "fix1", "title": "fix", "depends_on": ["t2"]}]},
+        known_ids={"t1", "t2"},
+    )
+    assert tasks[0].depends_on == ["t2"]
+
+
+def test_merge_tasks_normal_case() -> None:
+    done = [
+        planner.Task(id="t1", title="one", status=DONE),
+        planner.Task(id="t2", title="two", status=DONE),
+    ]
+    # Fresh corrective tasks (as the planner is instructed to produce) that
+    # depend on already-done work.
+    new = [
+        planner.Task(id="fix1", title="fix the thing", depends_on=["t2"]),
+        planner.Task(id="fix2", title="and another", depends_on=["fix1"]),
+    ]
+    merged = planner.merge_tasks(done, new)
+    assert [t.id for t in merged] == ["t1", "t2", "fix1", "fix2"]
+    assert all(t.status == DONE for t in merged[:2])  # done work preserved
+    assert merged[2].depends_on == ["t2"]  # dep on done task kept
+    assert merged[3].depends_on == ["fix1"]  # internal dep kept
+
+
+def test_merge_tasks_renames_id_collision() -> None:
+    done = [planner.Task(id="t1", title="one", status=DONE)]
+    new = [planner.Task(id="t1", title="corrective")]  # reuses a done id
+    merged = planner.merge_tasks(done, new)
+    assert merged[0].id == "t1"  # done task untouched
+    assert merged[1].id != "t1"  # new colliding task renamed
+    assert merged[1].title == "corrective"
+
+
 # --- task store ------------------------------------------------------------
 def test_task_store_lifecycle(tmp_path: Path) -> None:
     store = TaskStore(tmp_path / "issue-1")
