@@ -15,6 +15,7 @@ Worker and reviewer stages are stubbed until their milestones land.
 from __future__ import annotations
 
 import os
+import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -89,8 +90,22 @@ class TickReport:
         return sum(r.turns_taken for r in self.repos)
 
 
+def _short_exc(exc: Exception) -> str:
+    """Format an exception for a one-line log entry.
+
+    A subprocess timeout carries the entire command (including the multi-KB
+    agent prompt) in its string form; collapse it to something readable.
+    """
+    if isinstance(exc, subprocess.TimeoutExpired):
+        return f"agent timed out after {exc.timeout:.0f}s"
+    text = " ".join(str(exc).split())
+    limit = 200
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
 def _run_responder(gh, workspace, config, repo, issue, comments, bot_login, cwd, log, report) -> None:  # noqa: ANN001
     prompt = responder.build_prompt(issue, comments, bot_login)
+    log(f"  · {repo.slug}#{issue.number}: running responder ({config.model_for('responder')})…")
     result = opencode.run_agent(workspace, config, "responder", prompt, cwd=cwd, timeout=config.agent_timeout)
     if result.decision is None:
         log(f"  ! {repo.slug}#{issue.number}: responder produced no decision (rc={result.returncode})")
@@ -118,6 +133,7 @@ def _run_planner(gh, workspace, config, repo, issue, cwd, log, report) -> None: 
         replan_notes=replan_notes,
         existing_tasks=existing_tasks,
     )
+    log(f"  · {repo.slug}#{issue.number}: running planner ({config.model_for('planner')})…")
     result = opencode.run_agent(workspace, config, "planner", prompt, cwd=cwd, timeout=config.agent_timeout)
     if result.decision is None:
         log(f"  ! {repo.slug}#{issue.number}: planner produced no decision (rc={result.returncode})")
@@ -228,6 +244,7 @@ def _run_build(gh, workspace, config, repo, issue, token, log, report) -> None: 
         task = store.next_ready()
         if task is None:
             break
+        log(f"  · {repo.slug}#{number}: running worker {task.id} ({config.model_for('worker')}): {task.title}…")
         res = worker.run_task(workspace, config, repo, number, task, work_dir, token=token)
         report.turns_taken += 1
         ran += 1
@@ -327,7 +344,7 @@ def _process_repo(
             elif stage == "build":
                 _run_build(gh, workspace, config, repo, issue, token, log, report)
         except Exception as exc:  # noqa: BLE001 - one issue's failure must not abort the tick
-            log(f"  ! {repo.slug}#{issue.number}: {stage} crashed: {exc}")
+            log(f"  ! {repo.slug}#{issue.number}: {stage} crashed: {_short_exc(exc)}")
             report.actions.append(f"#{issue.number}: {stage} crashed")
 
     return report
