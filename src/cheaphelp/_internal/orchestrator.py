@@ -160,6 +160,7 @@ def _quality_gate(gh, workspace, config, repo, number, work_dir, log, report) ->
     )
     gh.add_labels(repo.owner, repo.name, number, [config.labels["needs_replan"]])
     gh.remove_label(repo.owner, repo.name, number, config.labels["planned"])
+    gh.remove_label(repo.owner, repo.name, number, config.labels["in_progress"])
     gh.create_comment(
         repo.owner,
         repo.name,
