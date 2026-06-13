@@ -12,7 +12,7 @@ from cheaphelp._internal.config import DEFAULT_AGENT_TIMEOUT, DEFAULT_MODELS, Co
 from cheaphelp._internal.env import parse_env, read_env_file, update_env_file
 from cheaphelp._internal.github import Comment, Issue
 from cheaphelp._internal.lock import RunLock
-from cheaphelp._internal.orchestrator import _process_repo, classify
+from cheaphelp._internal.orchestrator import _process_repo, _short_exc, classify
 from cheaphelp._internal.registry import Registry, RepoEntry, parse_slug
 from cheaphelp._internal.responder import (
     ATTRIBUTION_PREFIX,
@@ -586,6 +586,21 @@ def test_worker_build_prompt_is_task_scoped_without_full_gate() -> None:
     # The worker is not handed the full quality gate to run per task; that runs
     # once at the review step in the orchestrator.
     assert "Quality gate" not in prompt
+
+
+def test_short_exc_collapses_timeout_and_truncates() -> None:
+    import subprocess  # noqa: PLC0415 - local to keep the module import list lean
+
+    # A subprocess timeout normally stringifies the whole command (incl. the
+    # multi-KB prompt); _short_exc collapses it to a readable one-liner.
+    timeout = subprocess.TimeoutExpired(cmd=["opencode", "run", "x" * 5000], timeout=600.0)
+    assert _short_exc(timeout) == "agent timed out after 600s"
+    # Long messages are truncated with an ellipsis; multiline is flattened.
+    assert _short_exc(RuntimeError("a" * 500)).endswith("…")
+    assert len(_short_exc(RuntimeError("a" * 500))) <= 201
+    assert _short_exc(ValueError("line1\nline2")) == "line1 line2"
+    # Short messages pass through unchanged.
+    assert _short_exc(ValueError("boom")) == "boom"
 
 
 # --- orchestrator stage classification ------------------------------------
