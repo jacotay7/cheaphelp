@@ -76,7 +76,7 @@ class TickReport:
 
 def _run_responder(gh, workspace, config, repo, issue, comments, bot_login, cwd, log, report) -> None:  # noqa: ANN001
     prompt = responder.build_prompt(issue, comments, bot_login)
-    result = opencode.run_agent(workspace, config, "responder", prompt, cwd=cwd)
+    result = opencode.run_agent(workspace, config, "responder", prompt, cwd=cwd, timeout=config.agent_timeout)
     if result.decision is None:
         log(f"  ! {repo.slug}#{issue.number}: responder produced no decision (rc={result.returncode})")
         report.actions.append(f"#{issue.number}: responder unparseable")
@@ -103,7 +103,7 @@ def _run_planner(gh, workspace, config, repo, issue, cwd, log, report) -> None: 
         replan_notes=replan_notes,
         existing_tasks=existing_tasks,
     )
-    result = opencode.run_agent(workspace, config, "planner", prompt, cwd=cwd)
+    result = opencode.run_agent(workspace, config, "planner", prompt, cwd=cwd, timeout=config.agent_timeout)
     if result.decision is None:
         log(f"  ! {repo.slug}#{issue.number}: planner produced no decision (rc={result.returncode})")
         report.actions.append(f"#{issue.number}: planner unparseable")
