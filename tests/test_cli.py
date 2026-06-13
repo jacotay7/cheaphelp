@@ -114,6 +114,207 @@ def test_repo_list_text_default_unchanged(
     assert json.loads(json_out) == []
 
 
+# --- repo set --------------------------------------------------------------
+def test_repo_set_updates_only_checks(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """`repo set --checks` updates only the checks field; autofix is preserved."""
+    ws = _setup_workspace(tmp_path)
+    Registry(ws.registry_path).add(
+        RepoEntry(
+            owner="octocat",
+            name="hello",
+            checks="old-checks",
+            autofix="original-autofix",
+        ),
+    )
+
+    rc = main(
+        [
+            "--home",
+            str(ws.home),
+            "repo",
+            "set",
+            "octocat/hello",
+            "--checks",
+            "new-cmd",
+        ],
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Updated octocat/hello." in out
+
+    reloaded = Registry(ws.registry_path).find("octocat", "hello")
+    assert reloaded is not None
+    assert reloaded.checks == "new-cmd"
+    assert reloaded.autofix == "original-autofix"
+
+
+def test_repo_set_updates_only_autofix(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """`repo set --autofix` updates only the autofix field; checks is preserved."""
+    ws = _setup_workspace(tmp_path)
+    Registry(ws.registry_path).add(
+        RepoEntry(
+            owner="octocat",
+            name="hello",
+            checks="original-checks",
+            autofix="old-autofix",
+        ),
+    )
+
+    rc = main(
+        [
+            "--home",
+            str(ws.home),
+            "repo",
+            "set",
+            "octocat/hello",
+            "--autofix",
+            "new-fixer",
+        ],
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Updated octocat/hello." in out
+
+    reloaded = Registry(ws.registry_path).find("octocat", "hello")
+    assert reloaded is not None
+    assert reloaded.checks == "original-checks"
+    assert reloaded.autofix == "new-fixer"
+
+
+def test_repo_set_empty_clears_field(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """`repo set --checks ""` clears the checks field; autofix is preserved."""
+    ws = _setup_workspace(tmp_path)
+    Registry(ws.registry_path).add(
+        RepoEntry(
+            owner="octocat",
+            name="hello",
+            checks="something",
+            autofix="autofixer",
+        ),
+    )
+
+    rc = main(
+        [
+            "--home",
+            str(ws.home),
+            "repo",
+            "set",
+            "octocat/hello",
+            "--checks",
+            "",
+        ],
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Updated octocat/hello." in out
+
+    reloaded = Registry(ws.registry_path).find("octocat", "hello")
+    assert reloaded is not None
+    assert reloaded.checks == ""
+    assert reloaded.autofix == "autofixer"
+
+
+def test_repo_set_unknown_repo_exits_nonzero(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """`repo set` on a slug that isn't registered exits 1 and creates no file."""
+    ws = _setup_workspace(tmp_path)
+    # No registry file should exist yet — the failed set must not create it.
+    assert not ws.registry_path.exists()
+
+    rc = main(
+        [
+            "--home",
+            str(ws.home),
+            "repo",
+            "set",
+            "unknown/thing",
+            "--checks",
+            "x",
+        ],
+    )
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "unknown/thing is not registered." in err
+    assert not ws.registry_path.exists()
+
+
+def test_repo_set_no_flags_is_noop(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """`repo set` with no flags is a no-op; the registry file is byte-identical."""
+    ws = _setup_workspace(tmp_path)
+    Registry(ws.registry_path).add(
+        RepoEntry(
+            owner="octocat",
+            name="hello",
+            checks="same-checks",
+            autofix="same-autofix",
+        ),
+    )
+    before_bytes = ws.registry_path.read_bytes()
+    before_mtime_ns = ws.registry_path.stat().st_mtime_ns
+
+    rc = main(["--home", str(ws.home), "repo", "set", "octocat/hello"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Nothing to update" in out
+
+    after_bytes = ws.registry_path.read_bytes()
+    after_mtime_ns = ws.registry_path.stat().st_mtime_ns
+    # Byte-identical (and mtime untouched): a no-op must not touch the registry.
+    assert before_bytes == after_bytes
+    assert before_mtime_ns == after_mtime_ns
+
+    reloaded = Registry(ws.registry_path).find("octocat", "hello")
+    assert reloaded is not None
+    assert reloaded.checks == "same-checks"
+    assert reloaded.autofix == "same-autofix"
+
+
+def test_repo_set_list_reflects_update(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """After `repo set --checks`, `repo list --json` reports the new value."""
+    ws = _setup_workspace(tmp_path)
+    Registry(ws.registry_path).add(
+        RepoEntry(owner="octocat", name="hello", checks="old"),
+    )
+
+    rc = main(
+        [
+            "--home",
+            str(ws.home),
+            "repo",
+            "set",
+            "octocat/hello",
+            "--checks",
+            "new",
+        ],
+    )
+    assert rc == 0
+    capsys.readouterr()  # discard set stdout
+
+    rc = main(["--home", str(ws.home), "repo", "list", "--json"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    data = json.loads(out)
+    by_slug = {r["slug"]: r for r in data}
+    assert by_slug["octocat/hello"]["checks"] == "new"
+
+
 # --- daily log file --------------------------------------------------------
 def _setup_workspace(tmp_path: Path) -> Workspace:
     """Build a fresh, initialised workspace under ``tmp_path``."""
