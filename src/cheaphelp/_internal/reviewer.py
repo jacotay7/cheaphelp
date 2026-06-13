@@ -133,7 +133,7 @@ def apply_review(
         gh.add_labels(repo.owner, repo.name, number, [config.labels["in_review"]])
         gh.remove_label(repo.owner, repo.name, number, config.labels["planned"])
         gh.create_comment(
-            repo.owner, repo.name, number, f"{BOT_MARKER}\n\nOpened a pull request for review: {pr.get('html_url', '')}"
+            repo.owner, repo.name, number, f"{BOT_MARKER}\n\nOpened a pull request for review: {pr.get('html_url', '')}",
         )
         return ReviewResult(number=number, decision=choice, pr_url=pr.get("html_url"))
 

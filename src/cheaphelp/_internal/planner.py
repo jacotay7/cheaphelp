@@ -160,7 +160,7 @@ def apply_plan(
     gh.create_comment(owner, repo, number, body)
 
     gh.ensure_label(
-        owner, repo, config.labels["planned"], color="1d76db", description="cheaphelp: planned, ready for workers"
+        owner, repo, config.labels["planned"], color="1d76db", description="cheaphelp: planned, ready for workers",
     )
     gh.add_labels(owner, repo, number, [config.labels["planned"]])
     # Move out of the planner queue.
