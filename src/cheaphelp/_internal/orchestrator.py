@@ -194,6 +194,15 @@ def _run_build(gh, workspace, config, repo, issue, token, log, report) -> None: 
         report.actions.append(f"#{number}: work clone failed")
         return
 
+    gh.ensure_label(
+        repo.owner,
+        repo.name,
+        config.labels["in_progress"],
+        color="f9a825",
+        description="cheaphelp: worker is actively executing tasks",
+    )
+    gh.add_labels(repo.owner, repo.name, number, [config.labels["in_progress"]])
+
     # Run every currently-ready task; a linear chain finishes in one tick.
     ran = 0
     while ran < len(tasks):
@@ -229,6 +238,7 @@ def _run_build(gh, workspace, config, repo, issue, token, log, report) -> None: 
             description="cheaphelp: stuck; needs a human",
         )
         gh.add_labels(repo.owner, repo.name, number, [config.labels["needs_human"]])
+        gh.remove_label(repo.owner, repo.name, number, config.labels["in_progress"])
         log(f"  ! {repo.slug}#{number}: blocked; labeled needs-human")
         report.actions.append(f"#{number}: blocked")
 
