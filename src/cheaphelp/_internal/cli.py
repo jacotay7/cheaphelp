@@ -145,6 +145,12 @@ def get_parser() -> argparse.ArgumentParser:
         func=commands.cmd_doctor,
     )
 
+    # status
+    subparsers.add_parser(
+        "status",
+        help="List open issues for each enabled repo and their pipeline stage.",
+    ).set_defaults(func=commands.cmd_status)
+
     return parser
 
 
