@@ -16,6 +16,7 @@ from cheaphelp._internal import commands, debug
 from cheaphelp._internal.config import Config, Workspace
 from cheaphelp._internal.env import GITHUB_TOKEN_KEY, update_env_file
 from cheaphelp._internal.github import Comment, Issue
+from cheaphelp._internal.lock import RunLock
 from cheaphelp._internal.registry import Registry, RepoEntry
 
 
@@ -766,3 +767,31 @@ def test_status_no_workspace_exits_1(
     assert rc == 1
     err = capsys.readouterr().err
     assert "No workspace" in err
+
+
+# --- run-lock skip behaviour -----------------------------------------------
+def test_cmd_run_skips_when_lock_held(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """When another process holds the run lock, `cheaphelp run` logs a skip message.
+
+    The second invocation must exit 0 without doing any work, with the skip
+    notice mirrored to stdout (and the daily log file).
+    """
+    ws = _setup_workspace(tmp_path)  # existing helper: ensure + save_config
+    with RunLock(ws.run_lock_path) as holder:
+        assert holder.acquired
+        rc = main(["--home", str(ws.home), "run"])
+    assert rc == 0
+    captured = capsys.readouterr()
+    combined = captured.out + captured.err
+    # The skip message is routed through cmd_run's `log` callback (which
+    # mirrors to stdout) AND the daily log file.
+    assert "already running" in combined.lower()
+    assert "skipping" in combined.lower()
+    # The lock is the very first thing tick() does, so it should not have
+    # called out to GitHub — no "acting as @" line should appear.
+    assert "acting as" not in combined
+    # The "Done." summary is suppressed for a skipped tick.
+    assert "Done." not in combined

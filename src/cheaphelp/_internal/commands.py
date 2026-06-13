@@ -236,6 +236,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     if report.error:
         print(f"\nError: {report.error}", file=sys.stderr)
         return 1
+    if getattr(report, "skipped", False):
+        return 0  # skip message already logged via the tick's `log` callback
     print(f"\nDone. {report.total_turns} agent turn(s) across {len(report.repos)} repo(s).")
     return 0
 

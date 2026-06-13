@@ -196,6 +196,11 @@ class Workspace:
         return self.home / "logs"
 
     @property
+    def run_lock_path(self) -> Path:
+        """Path of the `fcntl`-locked file that serialises orchestrator ticks."""
+        return self.home / "run.lock"
+
+    @property
     def all_dirs(self) -> list[Path]:
         return [
             self.home,
