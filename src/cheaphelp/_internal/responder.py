@@ -15,11 +15,45 @@ from pathlib import Path
 from cheaphelp._internal.config import RESPONDER_DONE_LABEL_KEYS, Config, Workspace
 from cheaphelp._internal.github import Comment, GitHubClient, Issue
 
-# Hidden marker embedded in every comment the responder posts, so we can always
+# Hidden marker embedded in every message cheaphelp posts, so we can always
 # recognise our own comments regardless of which account the token belongs to.
 BOT_MARKER = "<!-- cheaphelp:responder -->"
 
+# Visible prefix of the attribution header. Kept as a stable constant so readers
+# (and models) can match on it to spot machine-generated messages.
+ATTRIBUTION_PREFIX = "🤖 cheaphelp"
+
 VALID_ACTIONS = {"comment", "finalize", "reject"}
+
+
+def attribution_header(role: str, model: str | None = None) -> str:
+    """Return the one-line cheaphelp attribution header for a posted message.
+
+    Identifies the message as machine-generated and names the agent (and model,
+    when one backs the role). The harness adds this; agents never write it.
+    """
+    header = f"{ATTRIBUTION_PREFIX} · agent `{role}`"
+    if model:
+        header += f" · model `{model}`"
+    return header
+
+
+def with_attribution(body: str, *, role: str, model: str | None = None) -> str:
+    """Prefix a message body with the visible attribution header + hidden marker."""
+    return f"{attribution_header(role, model)}\n{BOT_MARKER}\n\n{body.strip()}\n"
+
+
+def cheaphelp_message(body: str, role: str, config: Config) -> str:
+    """Build a GitHub message body carrying cheaphelp's attribution header.
+
+    Looks up the role's model (and variant) from `config` so the header records
+    exactly what ran. Roles not backed by a model (e.g. the quality gate) omit it.
+    """
+    model = config.models.get(role)
+    if model:
+        variant = config.variant_for(role)
+        model = f"{model} ({variant})" if variant else model
+    return with_attribution(body, role=role, model=model)
 
 
 def is_bot_comment(comment: Comment, bot_login: str) -> bool:
@@ -64,7 +98,10 @@ def build_prompt(issue: Issue, comments: list[Comment], bot_login: str) -> str:
     else:
         for comment in comments:
             who = "responder (you)" if is_bot_comment(comment, bot_login) else f"@{comment.user}"
-            body = comment.body.replace(BOT_MARKER, "").strip()
+            # Strip the hidden marker and the harness-added attribution header line;
+            # who-said-what is already labelled, so they would just be noise here.
+            stripped = comment.body.replace(BOT_MARKER, "")
+            body = "\n".join(line for line in stripped.splitlines() if not line.startswith(ATTRIBUTION_PREFIX)).strip()
             lines.append(f"### {who}")
             lines.append("")
             lines.append(body)
@@ -78,10 +115,6 @@ def build_prompt(issue: Issue, comments: list[Comment], bot_login: str) -> str:
         ],
     )
     return "\n".join(lines)
-
-
-def _with_marker(body: str) -> str:
-    return f"{BOT_MARKER}\n\n{body.strip()}\n"
 
 
 @dataclass
@@ -132,7 +165,7 @@ def apply_decision(
 
     reply = str(decision.get("reply", "")).strip()
     if reply:
-        gh.create_comment(owner, repo, issue.number, _with_marker(reply))
+        gh.create_comment(owner, repo, issue.number, cheaphelp_message(reply, "responder", config))
         result.posted_comment = True
 
     if action == "finalize":

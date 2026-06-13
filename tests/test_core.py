@@ -12,7 +12,15 @@ from cheaphelp._internal.env import parse_env, read_env_file, update_env_file
 from cheaphelp._internal.github import Comment, Issue
 from cheaphelp._internal.orchestrator import classify
 from cheaphelp._internal.registry import Registry, RepoEntry, parse_slug
-from cheaphelp._internal.responder import BOT_MARKER, build_prompt, needs_turn
+from cheaphelp._internal.responder import (
+    ATTRIBUTION_PREFIX,
+    BOT_MARKER,
+    attribution_header,
+    build_prompt,
+    cheaphelp_message,
+    is_bot_comment,
+    needs_turn,
+)
 from cheaphelp._internal.tasks import DONE, TaskStore
 
 
@@ -129,6 +137,37 @@ def test_build_prompt_includes_thread() -> None:
     assert "Issue #42" in prompt
     assert "@alice" in prompt
     assert "hi" in prompt
+
+
+def test_attribution_header_names_agent_and_model() -> None:
+    header = attribution_header("responder", "openrouter/x")
+    assert header.startswith(ATTRIBUTION_PREFIX)
+    assert "responder" in header
+    assert "openrouter/x" in header
+    # A role with no backing model omits the model segment.
+    assert "model" not in attribution_header("quality-gate", None)
+
+
+def test_cheaphelp_message_prefixes_header_marker_and_is_detected() -> None:
+    cfg = Config()  # responder has a model + the "max" variant by default
+    body = cheaphelp_message("hello world", "responder", cfg)
+    assert body.startswith(ATTRIBUTION_PREFIX)
+    assert cfg.model_for("responder") in body
+    assert "(max)" in body  # variant recorded
+    assert BOT_MARKER in body
+    assert "hello world" in body
+    # The hidden marker keeps the comment recognisable as cheaphelp's own.
+    assert is_bot_comment(_comment(body, "someone-else"), "mybot") is True
+
+
+def test_build_prompt_strips_attribution_header_from_thread() -> None:
+    cfg = Config()
+    own = cheaphelp_message("an earlier question", "responder", cfg)
+    prompt = build_prompt(_issue(number=7), [_comment(own, "mybot")], "mybot")
+    # The visible header and hidden marker are not shown back to the responder.
+    assert ATTRIBUTION_PREFIX not in prompt
+    assert BOT_MARKER not in prompt
+    assert "an earlier question" in prompt
 
 
 # --- opencode --------------------------------------------------------------

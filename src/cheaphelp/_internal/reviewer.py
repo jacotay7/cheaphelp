@@ -15,7 +15,7 @@ from cheaphelp._internal import gitutil, opencode
 from cheaphelp._internal.config import Config, Workspace
 from cheaphelp._internal.github import GitHubClient
 from cheaphelp._internal.registry import RepoEntry
-from cheaphelp._internal.responder import BOT_MARKER
+from cheaphelp._internal.responder import cheaphelp_message
 from cheaphelp._internal.tasks import TaskStore
 from cheaphelp._internal.worker import branch_name
 
@@ -103,10 +103,12 @@ def apply_review(
         body = str(decision.get("pr_body") or "").strip()
         reviewers = config.pr_reviewers or [repo.owner]
         mentions = " ".join(f"@{r}" for r in reviewers)
-        body = (
+        body = cheaphelp_message(
             f"{body}\n\nCloses #{number}\n\n"
             f"Requested reviewer(s): {mentions}\n\n"
-            "_Opened by cheaphelp; awaiting human review._"
+            "_Opened by cheaphelp; awaiting human review._",
+            "reviewer",
+            config,
         )
         try:
             pr = gh.create_pull_request(
@@ -136,7 +138,7 @@ def apply_review(
             repo.owner,
             repo.name,
             number,
-            f"{BOT_MARKER}\n\nOpened a pull request for review: {pr.get('html_url', '')}",
+            cheaphelp_message(f"Opened a pull request for review: {pr.get('html_url', '')}", "reviewer", config),
         )
         return ReviewResult(number=number, decision=choice, pr_url=pr.get("html_url"))
 
@@ -152,7 +154,12 @@ def apply_review(
     )
     gh.add_labels(repo.owner, repo.name, number, [config.labels["needs_replan"]])
     gh.remove_label(repo.owner, repo.name, number, config.labels["planned"])
-    gh.create_comment(repo.owner, repo.name, number, f"{BOT_MARKER}\n\nSending this back to planning:\n\n{notes}")
+    gh.create_comment(
+        repo.owner,
+        repo.name,
+        number,
+        cheaphelp_message(f"Sending this back to planning:\n\n{notes}", "reviewer", config),
+    )
     return ReviewResult(number=number, decision="replan")
 
 

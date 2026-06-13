@@ -12,7 +12,7 @@ from pathlib import Path
 
 from cheaphelp._internal.config import Config, Workspace
 from cheaphelp._internal.github import GitHubClient
-from cheaphelp._internal.responder import BOT_MARKER
+from cheaphelp._internal.responder import cheaphelp_message
 from cheaphelp._internal.tasks import DONE, Task, TaskStore
 
 
@@ -154,10 +154,10 @@ def apply_plan(
     write_plan_md(issue_dir, summary, tasks)
 
     verb = f"{len(new_tasks)} corrective task(s) added" if done else f"{len(tasks)} task(s)"
-    body = f"{BOT_MARKER}\n\n**Plan ready — {verb}.**\n\n{summary}\n\n" + "\n".join(
+    inner = f"**Plan ready — {verb}.**\n\n{summary}\n\n" + "\n".join(
         f"- `{t.id}` {t.title}" + (" ✓" if t.status == DONE else "") for t in tasks
     )
-    gh.create_comment(owner, repo, number, body)
+    gh.create_comment(owner, repo, number, cheaphelp_message(inner, "planner", config))
 
     gh.ensure_label(
         owner,
