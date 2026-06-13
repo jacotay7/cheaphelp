@@ -187,6 +187,33 @@ def cmd_repo_toggle(args: argparse.Namespace, *, enabled: bool) -> int:
     return 1
 
 
+def cmd_repo_set(args: argparse.Namespace) -> int:
+    ws = _workspace(args)
+    if (rc := _require_workspace(ws)) is not None:
+        return rc
+    try:
+        owner, name = parse_slug(args.slug)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+    updates: dict[str, str] = {}
+    if getattr(args, "checks", None) is not None:
+        updates["checks"] = args.checks
+    if getattr(args, "autofix", None) is not None:
+        updates["autofix"] = args.autofix
+
+    if not updates:
+        print(f"Nothing to update for {owner}/{name}.")
+        return 0
+
+    if Registry(ws.registry_path).update(owner, name, **updates):
+        print(f"Updated {owner}/{name}.")
+        return 0
+    print(f"{owner}/{name} is not registered.", file=sys.stderr)
+    return 1
+
+
 # --- run -------------------------------------------------------------------
 def cmd_run(args: argparse.Namespace) -> int:
     ws = _workspace(args)

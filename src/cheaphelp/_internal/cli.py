@@ -83,6 +83,22 @@ def get_parser() -> argparse.ArgumentParser:
     p_rm = repo_sub.add_parser("remove", help="Unregister a repository.")
     p_rm.add_argument("slug")
     p_rm.set_defaults(func=commands.cmd_repo_remove)
+    p_set = repo_sub.add_parser(
+        "set",
+        help="Update checks/autofix on an already-registered repository.",
+    )
+    p_set.add_argument("slug", help="Repository as owner/name or a GitHub URL.")
+    p_set.add_argument(
+        "--checks",
+        default=None,
+        help="Replace the quality-gate shell command. Pass an empty string to disable the gate.",
+    )
+    p_set.add_argument(
+        "--autofix",
+        default=None,
+        help="Replace the auto-fix shell command. Pass an empty string to disable auto-fix.",
+    )
+    p_set.set_defaults(func=commands.cmd_repo_set)
     p_en = repo_sub.add_parser("enable", help="Enable processing for a repository.")
     p_en.add_argument("slug")
     p_en.set_defaults(func=lambda a: commands.cmd_repo_toggle(a, enabled=True))
