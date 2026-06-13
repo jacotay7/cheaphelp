@@ -12,6 +12,7 @@ import re
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 _SLUG_RE = re.compile(r"^([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)$")
 
@@ -103,3 +104,33 @@ class Registry:
         if changed:
             self.save(repos)
         return changed
+
+    def update(self, owner: str, name: str, **fields: Any) -> bool:
+        """Update mutable fields on a registered repo in place.
+
+        Only fields that exist on ``RepoEntry`` and are explicitly set to a
+        non-``None`` value are applied. Unknown kwargs are ignored. Returns
+        ``False`` if the repo is not registered. The file is rewritten only
+        when at least one field actually changes; otherwise the call is a
+        no-op on disk.
+        """
+        repos = self.load()
+        target: RepoEntry | None = None
+        for repo in repos:
+            if repo.owner == owner and repo.name == name:
+                target = repo
+                break
+        if target is None:
+            return False
+        changed = False
+        for key, value in fields.items():
+            if value is None:
+                continue
+            if not hasattr(target, key):
+                continue  # unknown field; ignore silently
+            if getattr(target, key) != value:
+                setattr(target, key, value)
+                changed = True
+        if changed:
+            self.save(repos)
+        return True

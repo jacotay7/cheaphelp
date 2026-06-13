@@ -103,6 +103,76 @@ def test_registry_checks_roundtrip(tmp_path: Path) -> None:
     assert found.autofix == "ruff format ."
 
 
+def test_registry_update(tmp_path: Path) -> None:
+    reg = Registry(tmp_path / "repos.json")
+    reg.add(
+        RepoEntry(
+            owner="o",
+            name="r",
+            default_branch="develop",
+            enabled=False,
+            added_at="2024-01-01T00:00:00+00:00",
+            checks="ruff check . && pytest",
+            autofix="ruff format .",
+        ),
+    )
+
+    # 1. Update only checks -> autofix is unchanged (and vice versa).
+    assert reg.update("o", "r", checks="pytest -q") is True
+    found = reg.find("o", "r")
+    assert found is not None
+    assert found.checks == "pytest -q"
+    assert found.autofix == "ruff format ."
+
+    assert reg.update("o", "r", autofix="ruff check --fix .") is True
+    found = reg.find("o", "r")
+    assert found is not None
+    assert found.checks == "pytest -q"
+    assert found.autofix == "ruff check --fix ."
+
+    # 2. Update both checks and autofix in a single call.
+    assert reg.update("o", "r", checks="make test", autofix="make format") is True
+    found = reg.find("o", "r")
+    assert found is not None
+    assert found.checks == "make test"
+    assert found.autofix == "make format"
+
+    # 3. Setting checks="" (or autofix="") clears the value.
+    assert reg.update("o", "r", checks="", autofix="") is True
+    found = reg.find("o", "r")
+    assert found is not None
+    assert found.checks == ""
+    assert found.autofix == ""
+
+    # 4. Updating a slug that isn't registered returns False and does not
+    # create the file.
+    missing_path = tmp_path / "missing.json"
+    missing_reg = Registry(missing_path)
+    assert missing_reg.update("unknown", "thing", checks="x") is False
+    assert not missing_path.exists()
+
+    # 5. update leaves enabled, default_branch, and added_at untouched when
+    # called with only checks / autofix.
+    assert reg.update("o", "r", checks="make lint", autofix="make fmt") is True
+    found = reg.find("o", "r")
+    assert found is not None
+    assert found.enabled is False
+    assert found.default_branch == "develop"
+    assert found.added_at == "2024-01-01T00:00:00+00:00"
+
+    # 6. Calling update with no kwargs (or only None kwargs) returns True,
+    # does not change any field, and does not rewrite the file.
+    mtime_before = reg.path.stat().st_mtime_ns
+    assert reg.update("o", "r") is True
+    assert reg.update("o", "r", checks=None, autofix=None) is True
+    mtime_after = reg.path.stat().st_mtime_ns
+    assert mtime_before == mtime_after
+    found = reg.find("o", "r")
+    assert found is not None
+    assert found.checks == "make lint"
+    assert found.autofix == "make fmt"
+
+
 # --- responder -------------------------------------------------------------
 def _issue(number: int = 1, labels: list[str] | None = None) -> Issue:
     return Issue(
