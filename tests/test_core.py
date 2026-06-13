@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from cheaphelp._internal import opencode, planner, systemd, worker
-from cheaphelp._internal.config import DEFAULT_MODELS, Config, Workspace
+from cheaphelp._internal.config import DEFAULT_AGENT_TIMEOUT, DEFAULT_MODELS, Config, Workspace
 from cheaphelp._internal.env import parse_env, read_env_file, update_env_file
 from cheaphelp._internal.github import Comment, Issue
 from cheaphelp._internal.orchestrator import classify
@@ -41,6 +41,19 @@ def test_config_merges_defaults() -> None:
     assert cfg.model_for("worker") == "openrouter/custom"
     # Missing roles fall back to defaults.
     assert cfg.model_for("responder") == DEFAULT_MODELS["responder"]
+
+
+def test_agent_timeout_default_and_roundtrip() -> None:
+    # Default when constructed with no args.
+    assert Config().agent_timeout == DEFAULT_AGENT_TIMEOUT == 600.0
+    # Default when the key is absent from the on-disk dict.
+    assert Config.from_dict({}).agent_timeout == 600.0
+    # User override is honoured by from_dict and preserved by to_dict.
+    cfg = Config.from_dict({"agent_timeout": 1200})
+    assert cfg.agent_timeout == 1200.0
+    assert Config.from_dict(cfg.to_dict()).agent_timeout == 1200.0
+    # Float-typed values are accepted (the spec says `float`).
+    assert Config.from_dict({"agent_timeout": 30.5}).agent_timeout == 30.5
 
 
 def test_variant_for() -> None:
