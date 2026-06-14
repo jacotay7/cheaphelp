@@ -215,10 +215,16 @@ def get_parser() -> argparse.ArgumentParser:
     )
 
     # status
-    subparsers.add_parser(
+    p_status = subparsers.add_parser(
         "status",
         help="List open issues for each enabled repo and their pipeline stage.",
-    ).set_defaults(func=commands.cmd_status)
+    )
+    p_status.add_argument(
+        "--costs",
+        action="store_true",
+        help="Also show the cumulative cost per issue (read from <issue_dir>/cost.json).",
+    )
+    p_status.set_defaults(func=commands.cmd_status)
 
     # clean
     p_clean = subparsers.add_parser(

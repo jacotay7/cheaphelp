@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import os
 import random
 from collections.abc import Callable
 from pathlib import Path
-from unittest.mock import patch
 from typing import cast
+from unittest.mock import patch
 
 import httpx
 import pytest
@@ -29,7 +30,7 @@ from cheaphelp._internal.responder import (
     is_bot_comment,
     needs_turn,
 )
-from cheaphelp._internal.tasks import BLOCKED, DONE, PENDING, Task, TaskStore
+from cheaphelp._internal.tasks import BLOCKED, DONE, PENDING, IssueCostStore, Task, TaskStore
 
 
 # --- config / workspace ----------------------------------------------------
@@ -1228,6 +1229,163 @@ def test_run_agent_backoff_is_exponential(
     assert 1.5 <= sleeps[1] <= 2.5
 
 
+# --- UsageData --------------------------------------------------------------
+def test_usage_data_defaults() -> None:
+    u = opencode.UsageData()
+    assert u.prompt_tokens == 0
+    assert u.completion_tokens == 0
+    assert u.total_tokens == 0
+    assert u.cost_usd == 0.0
+
+
+def test_usage_data_addition() -> None:
+    a = opencode.UsageData(prompt_tokens=10, completion_tokens=20, total_tokens=30, cost_usd=0.001)
+    b = opencode.UsageData(prompt_tokens=100, completion_tokens=200, total_tokens=300, cost_usd=0.01)
+    c = a + b
+    assert c.prompt_tokens == 110
+    assert c.completion_tokens == 220
+    assert c.total_tokens == 330
+    assert c.cost_usd == 0.011
+    # Original objects unchanged.
+    assert a.prompt_tokens == 10
+    assert b.prompt_tokens == 100
+
+
+def test_usage_data_iadd() -> None:
+    a = opencode.UsageData(prompt_tokens=10, completion_tokens=20, total_tokens=30, cost_usd=0.001)
+    b = opencode.UsageData(prompt_tokens=100, completion_tokens=200, total_tokens=300, cost_usd=0.01)
+    result = a.__iadd__(b)
+    assert result is a  # returns self
+    assert a.prompt_tokens == 110
+    assert a.completion_tokens == 220
+    assert a.total_tokens == 330
+    assert a.cost_usd == 0.011
+
+
+def test_usage_data_to_dict_roundtrip() -> None:
+    u = opencode.UsageData(prompt_tokens=10, completion_tokens=20, total_tokens=30, cost_usd=0.001)
+    d = u.to_dict()
+    assert d == {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30, "cost_usd": 0.001}
+    restored = opencode.UsageData.from_dict(d)
+    assert restored == u
+
+
+def test_usage_data_from_dict_accepts_cost_key() -> None:
+    # OpenRouter returns "cost" in the usage payload; accept it as cost_usd.
+    u = opencode.UsageData.from_dict({"prompt_tokens": 10, "completion_tokens": 20, "cost": 0.005})
+    assert u.prompt_tokens == 10
+    assert u.completion_tokens == 20
+    assert u.cost_usd == 0.005
+    # cost_usd key takes precedence over cost when both are present.
+    u2 = opencode.UsageData.from_dict({"prompt_tokens": 1, "cost": 0.01, "cost_usd": 0.02})
+    assert u2.cost_usd == 0.02
+
+
+def test_usage_data_from_dict_coerces_types() -> None:
+    u = opencode.UsageData.from_dict({"prompt_tokens": "10", "completion_tokens": "20", "cost": "0.005"})
+    assert u.prompt_tokens == 10
+    assert u.completion_tokens == 20
+    assert u.cost_usd == 0.005
+
+
+def test_usage_data_from_dict_empty() -> None:
+    u = opencode.UsageData.from_dict({})
+    assert u.prompt_tokens == 0
+    assert u.completion_tokens == 0
+    assert u.total_tokens == 0
+    assert u.cost_usd == 0.0
+
+
+# --- _parse_usage -----------------------------------------------------------
+def test_parse_usage_from_stderr() -> None:
+    usage = opencode._parse_usage("", '{"prompt_tokens": 10, "completion_tokens": 20, "cost": 0.001}')
+    assert usage is not None
+    assert usage.prompt_tokens == 10
+    assert usage.completion_tokens == 20
+    assert usage.cost_usd == 0.001
+
+
+def test_parse_usage_from_stdout_when_stderr_empty() -> None:
+    usage = opencode._parse_usage(
+        '{"prompt_tokens": 5, "completion_tokens": 15, "cost_usd": 0.002}',
+        "",
+    )
+    assert usage is not None
+    assert usage.prompt_tokens == 5
+    assert usage.completion_tokens == 15
+    assert usage.cost_usd == 0.002
+
+
+def test_parse_usage_nested_usage_key() -> None:
+    payload = '{"id": "xyz", "usage": {"prompt_tokens": 100, "completion_tokens": 50, "cost": 0.01}}'
+    usage = opencode._parse_usage("", payload)
+    assert usage is not None
+    assert usage.prompt_tokens == 100
+    assert usage.completion_tokens == 50
+    assert usage.cost_usd == 0.01
+
+
+def test_parse_usage_line_by_line_fallback() -> None:
+    # A mixed stderr with a JSON usage object on one line.
+    stderr = 'some log info\n{"prompt_tokens": 7, "completion_tokens": 3, "cost": 0.0005}\ndone'
+    usage = opencode._parse_usage("", stderr)
+    assert usage is not None
+    assert usage.prompt_tokens == 7
+    assert usage.completion_tokens == 3
+    assert usage.cost_usd == 0.0005
+
+
+def test_parse_usage_stderr_takes_precedence() -> None:
+    usage = opencode._parse_usage(
+        '{"prompt_tokens": 1, "completion_tokens": 1, "cost": 0.001}',
+        '{"prompt_tokens": 99, "completion_tokens": 99, "cost": 0.099}',
+    )
+    assert usage is not None
+    assert usage.prompt_tokens == 99  # stderr won
+    assert usage.completion_tokens == 99
+
+
+def test_parse_usage_returns_none_when_no_json() -> None:
+    assert opencode._parse_usage("just prose", "") is None
+    assert opencode._parse_usage("", "more prose") is None
+    assert opencode._parse_usage("", "") is None
+    assert opencode._parse_usage('noise\n```json\n{"status": "ok"}\n```', "") is None
+
+
+# --- run_agent usage population ---------------------------------------------
+def test_run_agent_populates_usage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    monkeypatch.setattr(opencode, "find_opencode", lambda _cfg: Path("opencode"))
+
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **_kwargs: object) -> object:
+        calls.append(cmd)
+        stderr = '{"prompt_tokens": 50, "completion_tokens": 30, "cost": 0.004}'
+        return SimpleNamespace(
+            returncode=0,
+            stdout='```json\n{"status": "done"}\n```',
+            stderr=stderr,
+        )
+
+    monkeypatch.setattr(opencode.subprocess, "run", fake_run)
+
+    result = opencode.run_agent(ws, Config(), "worker", "do it", cwd=tmp_path)
+    assert result.decision == {"status": "done"}
+    assert len(calls) == 1
+    assert result.usage is not None
+    assert result.usage.prompt_tokens == 50
+    assert result.usage.completion_tokens == 30
+    assert result.usage.cost_usd == 0.004
+
+
+# --- opencode config shape --------------------------------------------------
 def test_build_opencode_config_shape() -> None:
     doc = opencode.build_opencode_config(Config())
     assert doc["$schema"] == opencode.OPENCODE_SCHEMA
@@ -1396,6 +1554,84 @@ def test_task_store_record_attempt(tmp_path: Path) -> None:
     assert store.record_attempt("t1") == 1
     assert store.record_attempt("t1") == 2
     assert store.load()[0].attempts == 2
+
+
+# --- issue cost store -------------------------------------------------------
+def test_issue_cost_store_load_missing_file_returns_zeros(tmp_path: Path) -> None:
+    store = IssueCostStore(tmp_path / "issue-1")
+    usage = store.load()
+    assert usage.prompt_tokens == 0
+    assert usage.completion_tokens == 0
+    assert usage.total_tokens == 0
+    assert usage.cost_usd == 0.0
+
+
+def test_issue_cost_store_add_returns_cumulative_total(tmp_path: Path) -> None:
+    store = IssueCostStore(tmp_path / "issue-2")
+    u1 = opencode.UsageData(prompt_tokens=10, completion_tokens=20, total_tokens=30, cost_usd=0.001)
+    total = store.add(u1)
+    assert total.prompt_tokens == 10
+    assert total.completion_tokens == 20
+    assert total.total_tokens == 30
+    assert total.cost_usd == 0.001
+    # Verify the file was written with the right shape.
+    assert (tmp_path / "issue-2" / "cost.json").exists()
+    data = json.loads((tmp_path / "issue-2" / "cost.json").read_text(encoding="utf-8"))
+    assert data == {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30, "cost_usd": 0.001}
+
+
+def test_issue_cost_store_accumulates_across_instances(tmp_path: Path) -> None:
+    """Two add() calls across separate IssueCostStore instances simulate restart."""
+    store1 = IssueCostStore(tmp_path / "issue-3")
+    store1.add(opencode.UsageData(prompt_tokens=5, completion_tokens=5, total_tokens=10, cost_usd=0.0005))
+
+    store2 = IssueCostStore(tmp_path / "issue-3")
+    total = store2.add(opencode.UsageData(prompt_tokens=10, completion_tokens=20, total_tokens=30, cost_usd=0.001))
+    assert total.prompt_tokens == 15
+    assert total.completion_tokens == 25
+    assert total.total_tokens == 40
+    assert total.cost_usd == 0.0015
+
+    # Verify persistence: a third instance reads back the cumulative total.
+    store3 = IssueCostStore(tmp_path / "issue-3")
+    loaded = store3.load()
+    assert loaded.prompt_tokens == 15
+    assert loaded.completion_tokens == 25
+    assert loaded.total_tokens == 40
+    assert loaded.cost_usd == 0.0015
+
+
+def test_issue_cost_store_corrupt_file_treated_as_zero(tmp_path: Path) -> None:
+    path = tmp_path / "issue-4" / "cost.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("not json", encoding="utf-8")
+    store = IssueCostStore(tmp_path / "issue-4")
+    usage = store.load()
+    assert usage.prompt_tokens == 0
+    assert usage.completion_tokens == 0
+    assert usage.total_tokens == 0
+    assert usage.cost_usd == 0.0
+
+    # Non-dict JSON is also treated as zero.
+    path.write_text("[]", encoding="utf-8")
+    usage = store.load()
+    assert usage.prompt_tokens == 0
+    assert usage.completion_tokens == 0
+    assert usage.total_tokens == 0
+    assert usage.cost_usd == 0.0
+
+
+def test_issue_cost_store_save_creates_parent_dir(tmp_path: Path) -> None:
+    """save() creates the parent directory when it does not exist."""
+    store = IssueCostStore(tmp_path / "a" / "b" / "issue-5")
+    usage = opencode.UsageData(prompt_tokens=1, completion_tokens=2, total_tokens=3, cost_usd=0.0001)
+    store.save(usage)
+    assert store.path.exists()
+    loaded = store.load()
+    assert loaded.prompt_tokens == 1
+    assert loaded.completion_tokens == 2
+    assert loaded.total_tokens == 3
+    assert loaded.cost_usd == 0.0001
 
 
 def test_run_task_timeout_retries_then_escalates(
@@ -1767,10 +2003,10 @@ def test_run_build_blast_radius_prevents_reviewer(
 
     # needs-human label was added.
     add_labels_calls = [c for c in gh.calls if c[0] == "add_labels"]
-    needs_human_added = any(
-        config.labels["needs_human"] in cast("list[str]", c[1][-1]) for c in add_labels_calls
-    )
+    needs_human_added = any(config.labels["needs_human"] in cast("list[str]", c[1][-1]) for c in add_labels_calls)
     assert needs_human_added, "needs-human label should have been added"
+
+
 # --- conventions ------------------------------------------------------------
 def test_read_conventions_no_file(tmp_path: Path) -> None:
     assert read_conventions(tmp_path) == ""
@@ -2009,7 +2245,7 @@ def test_worker_run_task_forwards_conventions(
     monkeypatch.setattr(
         opencode,
         "run_agent",
-        lambda *a, **kw: SimpleNamespace(decision={"status": "done", "summary": "ok"}),
+        lambda *a, **kw: SimpleNamespace(decision={"status": "done", "summary": "ok"}, usage=None),
     )
 
     captured: list[str] = []
@@ -2064,7 +2300,7 @@ def test_reviewer_review_issue_forwards_conventions(
     monkeypatch.setattr(
         opencode,
         "run_agent",
-        lambda *a, **kw: SimpleNamespace(decision={"decision": "open_pr", "pr_title": "x", "pr_body": "y"}),
+        lambda *a, **kw: SimpleNamespace(decision={"decision": "open_pr", "pr_title": "x", "pr_body": "y"}, usage=None),
     )
 
     captured: list[str] = []
@@ -2107,3 +2343,248 @@ def test_reviewer_review_issue_forwards_conventions(
 
     assert captured == ["SENTINEL_AGENT_RULES"]
     assert result.decision == "open_pr"
+
+
+# --- cost recording ----------------------------------------------------------
+
+
+def test_run_responder_records_cost(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_run_responder records token/cost data via _record_cost."""
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    ws.save_config(Config())
+    monkeypatch.setenv("CHEAPHELP_AGENT_MOCK", "/dev/null")  # skip clone
+
+    repo = RepoEntry(owner="octocat", name="hello")
+    issue = Issue(number=1, title="t", body="b", state="open", labels=[], user="alice", html_url="")
+
+    usage = opencode.UsageData(prompt_tokens=100, completion_tokens=50, cost_usd=0.002)
+    result = opencode.AgentResult(
+        returncode=0,
+        stdout='```json\n{"action":"comment","reply":"q?"}\n```',
+        stderr="",
+        decision={"action": "comment", "reply": "q?"},
+        usage=usage,
+    )
+    monkeypatch.setattr(opencode, "run_agent", lambda *a, **kw: result)
+
+    fake_gh = _RecordingResponderGH()
+    report = orchestrator.RepoReport(slug=repo.slug)
+
+    orchestrator._run_responder(
+        fake_gh,
+        ws,
+        Config(),
+        repo,
+        issue,
+        [],
+        "mybot",
+        tmp_path,
+        lambda _m: None,
+        report,
+    )
+
+    assert report.cost == usage
+    assert report.issue_costs[1]["responder"] == [usage]
+
+    # Verify cost.json was written and round-trips.
+    cost_path = ws.issue_dir(repo.owner, repo.name, 1) / "cost.json"
+    assert cost_path.exists()
+    loaded = IssueCostStore(ws.issue_dir(repo.owner, repo.name, 1)).load()
+    assert loaded == usage
+
+
+def test_run_responder_skips_cost_when_usage_none(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A result with usage=None is a no-op for cost recording."""
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    ws.save_config(Config())
+    monkeypatch.setenv("CHEAPHELP_AGENT_MOCK", "/dev/null")
+
+    repo = RepoEntry(owner="octocat", name="hello")
+    issue = Issue(number=1, title="t", body="b", state="open", labels=[], user="alice", html_url="")
+
+    result = opencode.AgentResult(
+        returncode=0,
+        stdout='```json\n{"action":"comment","reply":"q?"}\n```',
+        stderr="",
+        decision={"action": "comment", "reply": "q?"},
+        usage=None,
+    )
+    monkeypatch.setattr(opencode, "run_agent", lambda *a, **kw: result)
+
+    fake_gh = _RecordingResponderGH()
+    report = orchestrator.RepoReport(slug=repo.slug)
+
+    orchestrator._run_responder(
+        fake_gh,
+        ws,
+        Config(),
+        repo,
+        issue,
+        [],
+        "mybot",
+        tmp_path,
+        lambda _m: None,
+        report,
+    )
+
+    assert report.cost == opencode.UsageData()
+    assert report.issue_costs == {}
+    cost_path = ws.issue_dir(repo.owner, repo.name, 1) / "cost.json"
+    assert not cost_path.exists()
+
+
+def test_run_planner_records_cost(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_run_planner records cost from the planner agent call."""
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    ws.save_config(Config())
+    monkeypatch.setenv("CHEAPHELP_AGENT_MOCK", "/dev/null")
+
+    repo = RepoEntry(owner="octocat", name="hello")
+    issue = Issue(number=1, title="t", body="b", state="open", labels=[], user="alice", html_url="")
+
+    # Create issues.md so planner does not early-return.
+    issue_dir = ws.issue_dir(repo.owner, repo.name, issue.number)
+    issue_dir.mkdir(parents=True, exist_ok=True)
+    (issue_dir / "issues.md").write_text("# The spec", encoding="utf-8")
+
+    usage = opencode.UsageData(prompt_tokens=200, completion_tokens=100, cost_usd=0.008)
+    result = opencode.AgentResult(
+        returncode=0,
+        stdout='```json\n{"plan_summary":"plan","tasks":[{"id":"t1","title":"x"}]}\n```',
+        stderr="",
+        decision={"plan_summary": "plan", "tasks": [{"id": "t1", "title": "x"}]},
+        usage=usage,
+    )
+    monkeypatch.setattr(opencode, "run_agent", lambda *a, **kw: result)
+
+    # Mock apply_plan so it doesn't actually modify GitHub state.
+    def fake_apply_plan(*_a: object, **_kw: object) -> object:
+        from cheaphelp._internal.planner import PlanResult  # noqa: PLC0415
+
+        return PlanResult(number=1, task_count=1)
+
+    monkeypatch.setattr(planner, "apply_plan", fake_apply_plan)
+
+    fake_gh = _RecordingResponderGH()
+    report = orchestrator.RepoReport(slug=repo.slug)
+
+    orchestrator._run_planner(
+        fake_gh,
+        ws,
+        Config(),
+        repo,
+        issue,
+        tmp_path,
+        lambda _m: None,
+        report,
+    )
+
+    assert report.cost == usage
+    assert report.issue_costs[1]["planner"] == [usage]
+    cost_path = ws.issue_dir(repo.owner, repo.name, 1) / "cost.json"
+    assert cost_path.exists()
+    loaded = IssueCostStore(ws.issue_dir(repo.owner, repo.name, 1)).load()
+    assert loaded == usage
+
+
+def test_run_build_records_worker_and_reviewer_costs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_run_build records costs for each worker turn and the reviewer."""
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    repo = RepoEntry(owner="octocat", name="hello")
+    issue = Issue(number=1, title="t", body="b", state="open", labels=[], user="u", html_url="")
+    issue_dir = ws.issue_dir(repo.owner, repo.name, issue.number)
+    store = TaskStore(issue_dir)
+    _, tasks = planner.parse_manifest(
+        {"tasks": [{"id": "t1", "title": "one"}, {"id": "t2", "title": "two"}]},
+    )
+    store.materialize(tasks)
+
+    monkeypatch.setattr(gitutil, "ensure_work_clone", lambda *_a, **_k: None)
+    monkeypatch.setattr(gitutil, "diff_stat", lambda *_a, **_k: None)
+    monkeypatch.setattr(gitutil, "commit_all", lambda *_a, **_k: False)
+    monkeypatch.setattr(gitutil, "push_branch", lambda *_a, **_k: None)
+
+    worker_usage = opencode.UsageData(prompt_tokens=50, completion_tokens=25, cost_usd=0.001)
+
+    def fake_run_task(_ws, _cfg, _repo, number, task, _work_dir, *, token):  # noqa: ANN001, ANN202
+        TaskStore(ws.issue_dir(repo.owner, repo.name, number)).set_status(task.id, DONE, summary="ok")
+        return worker.WorkResult(task_id=task.id, status=DONE, committed=True, usage=worker_usage)
+
+    monkeypatch.setattr(worker, "run_task", fake_run_task)
+
+    reviewer_usage = opencode.UsageData(prompt_tokens=30, completion_tokens=15, cost_usd=0.002)
+
+    def fake_review_issue(*_a: object, **_kw: object) -> object:
+        return reviewer.ReviewResult(number=1, decision="open_pr", usage=reviewer_usage)
+
+    monkeypatch.setattr(reviewer, "review_issue", fake_review_issue)
+
+    gh = _RecBuildGH()
+    report = orchestrator.RepoReport(slug=repo.slug)
+    config = Config()
+    orchestrator._run_build(gh, ws, config, repo, issue, "token", lambda _m: None, report)
+
+    # Two workers + one reviewer.
+    expected_cost = worker_usage + worker_usage + reviewer_usage
+    assert report.cost == expected_cost
+    assert len(report.issue_costs[1]["worker"]) == 2
+    assert report.issue_costs[1]["worker"][0] == worker_usage
+    assert report.issue_costs[1]["worker"][1] == worker_usage
+    assert report.issue_costs[1]["reviewer"] == [reviewer_usage]
+
+
+def test_tick_report_total_cost_sums_across_repos(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """TickReport.total_cost equals the sum of RepoReport.cost across repos."""
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    ws.save_config(Config())
+    monkeypatch.setenv("CHEAPHELP_AGENT_MOCK", "/dev/null")
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+
+    # Register two repos.
+    reg = Registry(ws.registry_path)
+    reg.add(RepoEntry(owner="octocat", name="hello", enabled=True))
+    reg.add(RepoEntry(owner="octocat", name="world", enabled=True))
+
+    # Mock the GitHub client so the tick never touches the network: both repos
+    # report zero open issues, so each yields a RepoReport with cost=UsageData().
+    class _NoIssuesGH:
+        def __enter__(self) -> _NoIssuesGH:
+            return self
+
+        def __exit__(self, *_exc: object) -> bool:
+            return False
+
+        def authenticated_login(self) -> str:
+            return "mybot"
+
+        def list_open_issues(self, _owner: str, _name: str) -> list[Issue]:
+            return []
+
+    monkeypatch.setattr(orchestrator, "GitHubClient", lambda *_a, **_k: _NoIssuesGH())
+
+    report = orchestrator.tick(ws, log=lambda _m: None)
+
+    # Both repos have cost=UsageData() (no agent ran, mock mode /dev/null).
+    assert len(report.repos) == 2
+    assert report.total_cost == opencode.UsageData()
+    assert report.total_cost == report.repos[0].cost + report.repos[1].cost

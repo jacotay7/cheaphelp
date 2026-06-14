@@ -12,6 +12,7 @@ invocation that returns the agent's text output plus any parsed decision block.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -111,6 +112,49 @@ def _permission_for(role: str, sandbox: dict[str, bool]) -> dict:
 
 
 @dataclass
+class UsageData:
+    """Token usage and estimated cost from an OpenRouter API call."""
+
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    cost_usd: float = 0.0
+
+    def __add__(self, other: UsageData) -> UsageData:
+        return UsageData(
+            prompt_tokens=self.prompt_tokens + other.prompt_tokens,
+            completion_tokens=self.completion_tokens + other.completion_tokens,
+            total_tokens=self.total_tokens + other.total_tokens,
+            cost_usd=self.cost_usd + other.cost_usd,
+        )
+
+    def __iadd__(self, other: UsageData) -> UsageData:
+        self.prompt_tokens += other.prompt_tokens
+        self.completion_tokens += other.completion_tokens
+        self.total_tokens += other.total_tokens
+        self.cost_usd += other.cost_usd
+        return self
+
+    def to_dict(self) -> dict:
+        return {
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "total_tokens": self.total_tokens,
+            "cost_usd": self.cost_usd,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> UsageData:
+        """Build from a dict, accepting both ``cost`` and ``cost_usd`` keys."""
+        return cls(
+            prompt_tokens=int(data.get("prompt_tokens", 0)),
+            completion_tokens=int(data.get("completion_tokens", 0)),
+            total_tokens=int(data.get("total_tokens", 0)),
+            cost_usd=float(data.get("cost_usd", data.get("cost", 0.0))),
+        )
+
+
+@dataclass
 class AgentResult:
     """Outcome of a headless opencode invocation."""
 
@@ -118,6 +162,7 @@ class AgentResult:
     stdout: str
     stderr: str
     decision: dict | None  # the parsed final ```json block, if present
+    usage: UsageData | None = None
 
     @property
     def ok(self) -> bool:
@@ -240,6 +285,49 @@ def write_opencode_config(workspace: Workspace, config: Config) -> Path:
     return path
 
 
+def _parse_usage(stdout: str, stderr: str) -> UsageData | None:
+    """Parse token usage / cost data from opencode's stderr or stdout.
+
+    Tries *stderr* first, then *stdout*. For each source, attempts
+    ``json.loads`` on the whole string and, if that fails, on each line
+    that starts with ``{`` independently.  A parsed object is considered a
+    usage payload when it is a dict that either has a nested ``usage`` dict
+    or itself contains one of ``prompt_tokens``, ``completion_tokens``,
+    ``cost``, ``cost_usd``.  Returns ``None`` when nothing parseable is
+    found.
+    """
+    for source in (stderr, stdout):
+        if not source:
+            continue
+
+        data: object | None = None
+        # Try the whole string first.
+        with contextlib.suppress(json.JSONDecodeError):
+            data = json.loads(source)
+
+        if data is None:
+            # Fall back: each line that starts with '{'
+            for line in source.splitlines():
+                stripped = line.strip()
+                if stripped.startswith("{") and stripped.endswith("}"):
+                    try:
+                        data = json.loads(stripped)
+                        break
+                    except json.JSONDecodeError:
+                        continue
+
+        if isinstance(data, dict):
+            # Nested "usage" key takes precedence.
+            usage_dict = data.get("usage")
+            if isinstance(usage_dict, dict):
+                return UsageData.from_dict(usage_dict)
+            # Otherwise the dict itself must contain usage fields.
+            if data.keys() & {"prompt_tokens", "completion_tokens", "cost", "cost_usd"}:
+                return UsageData.from_dict(data)
+
+    return None
+
+
 # Match the LAST fenced ```json block in a string.
 _JSON_BLOCK_RE = re.compile(r"```json\s*(\{.*?\})\s*```", re.DOTALL)
 
@@ -354,12 +442,14 @@ def run_agent(
             timeout=timeout,
             check=False,
         )
-        return AgentResult(
+        result = AgentResult(
             returncode=proc.returncode,
             stdout=proc.stdout,
             stderr=proc.stderr,
             decision=extract_decision(proc.stdout),
         )
+        result.usage = _parse_usage(result.stdout, result.stderr)
+        return result
 
     max_attempts = max(1, config.retry_attempts)
     for attempt in range(1, max_attempts + 1):

@@ -27,8 +27,9 @@ from cheaphelp._internal.env import GITHUB_TOKEN_KEY, OPENROUTER_API_KEY, load_i
 from cheaphelp._internal.github import GitHubClient, Issue
 from cheaphelp._internal.gitutil import ensure_clone
 from cheaphelp._internal.lock import RunLock
+from cheaphelp._internal.opencode import UsageData
 from cheaphelp._internal.registry import Registry, RepoEntry
-from cheaphelp._internal.tasks import TaskStore
+from cheaphelp._internal.tasks import IssueCostStore, TaskStore
 
 Logger = Callable[[str], None]
 
@@ -104,6 +105,8 @@ class RepoReport:
     turns_taken: int = 0
     actions: list[str] = field(default_factory=list)
     error: str | None = None
+    cost: UsageData = field(default_factory=UsageData)
+    issue_costs: dict[int, dict[str, list[UsageData]]] = field(default_factory=dict)
 
 
 @dataclass
@@ -115,6 +118,7 @@ class TickReport:
     repos: list[RepoReport] = field(default_factory=list)
     error: str | None = None
     skipped: bool = False
+    total_cost: UsageData = field(default_factory=UsageData)
 
     @property
     def total_turns(self) -> int:
@@ -134,10 +138,28 @@ def _short_exc(exc: Exception) -> str:
     return text if len(text) <= limit else text[:limit] + "…"
 
 
+def _record_cost(
+    workspace: Workspace,
+    repo: RepoEntry,
+    number: int,
+    role: str,
+    usage: UsageData | None,
+    report: RepoReport,
+) -> None:
+    """Record token/cost data from an agent turn and persist to the issue's cost store."""
+    if usage is None:
+        return
+    IssueCostStore(workspace.issue_dir(repo.owner, repo.name, number)).add(usage)
+    report.cost = report.cost + usage
+    by_issue = report.issue_costs.setdefault(number, {})
+    by_issue.setdefault(role, []).append(usage)
+
+
 def _run_responder(gh, workspace, config, repo, issue, comments, bot_login, cwd, log, report) -> None:  # noqa: ANN001
     prompt = responder.build_prompt(issue, comments, bot_login, conventions=read_conventions(cwd))
     log(f"  · {repo.slug}#{issue.number}: running responder ({config.model_for('responder')})…")
     result = opencode.run_agent(workspace, config, "responder", prompt, cwd=cwd, timeout=config.agent_timeout)
+    _record_cost(workspace, repo, issue.number, "responder", result.usage, report)
     if result.decision is None:
         log(f"  ! {repo.slug}#{issue.number}: responder produced no decision (rc={result.returncode})")
         report.actions.append(f"#{issue.number}: responder unparseable")
@@ -167,6 +189,7 @@ def _run_planner(gh, workspace, config, repo, issue, cwd, log, report) -> None: 
     )
     log(f"  · {repo.slug}#{issue.number}: running planner ({config.model_for('planner')})…")
     result = opencode.run_agent(workspace, config, "planner", prompt, cwd=cwd, timeout=config.agent_timeout)
+    _record_cost(workspace, repo, issue.number, "planner", result.usage, report)
     if result.decision is None:
         log(f"  ! {repo.slug}#{issue.number}: planner produced no decision (rc={result.returncode})")
         report.actions.append(f"#{issue.number}: planner unparseable")
@@ -330,6 +353,7 @@ def _run_build(gh, workspace, config, repo, issue, token, log, report) -> None: 
             break
         log(f"  · {repo.slug}#{number}: running worker {task.id} ({config.model_for('worker')}): {task.title}…")
         res = worker.run_task(workspace, config, repo, number, task, work_dir, token=token)
+        _record_cost(workspace, repo, number, "worker", res.usage, report)
         report.turns_taken += 1
         ran += 1
         flag = " +commit" if res.committed else ""
@@ -354,6 +378,7 @@ def _run_build(gh, workspace, config, repo, issue, token, log, report) -> None: 
             return
         log(f"  > {repo.slug}#{number}: all tasks done; running reviewer")
         rr = reviewer.review_issue(gh, workspace, config, repo, number, work_dir, token=token)
+        _record_cost(workspace, repo, number, "reviewer", rr.usage, report)
         report.turns_taken += 1
         detail = rr.pr_url or rr.error or rr.decision
         log(f"  > {repo.slug}#{number}: reviewer {rr.decision} ({detail})")
@@ -555,5 +580,8 @@ def tick(
                 )
     except Exception as exc:  # noqa: BLE001 - top-level guard for the tick
         report.error = str(exc)
+
+    for r in report.repos:
+        report.total_cost = report.total_cost + r.cost
 
     return report
