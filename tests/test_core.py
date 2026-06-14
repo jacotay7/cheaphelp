@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -1225,7 +1226,7 @@ def test_check_blast_radius_files_exceeded(
 
     # in-progress was removed.
     remove_label_call = next(c for c in gh.calls if c[0] == "remove_label")
-    assert config.labels["in_progress"] in remove_label_call[1]  # ty: ignore[unsupported-operator]
+    assert config.labels["in_progress"] in remove_label_call[1]
 
     # Comment body contains "45" and "blast-radius".
     comment_call = next(c for c in gh.calls if c[0] == "create_comment")
@@ -1358,7 +1359,9 @@ def test_run_build_blast_radius_prevents_reviewer(
 
     # needs-human label was added.
     add_labels_calls = [c for c in gh.calls if c[0] == "add_labels"]
-    needs_human_added = any(config.labels["needs_human"] in c[1][-1] for c in add_labels_calls)
+    needs_human_added = any(
+        config.labels["needs_human"] in cast("list[str]", c[1][-1]) for c in add_labels_calls
+    )
     assert needs_human_added, "needs-human label should have been added"
 # --- conventions ------------------------------------------------------------
 def test_read_conventions_no_file(tmp_path: Path) -> None:
