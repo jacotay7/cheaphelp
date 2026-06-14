@@ -6,10 +6,9 @@ right agent:
 
     (no pipeline label) + human spoke last  -> responder  (refine scope)
     cheaphelp:ready / cheaphelp:needs-replan -> planner    (produce tasks)
-    cheaphelp:planned, tasks pending         -> worker     (implement) [phase 3]
-    cheaphelp:planned, all tasks done        -> reviewer   (PR/replan) [phase 4]
-
-Worker and reviewer stages are stubbed until their milestones land.
+    cheaphelp:planned, tasks pending         -> worker     (implement)
+    cheaphelp:planned, all tasks done        -> reviewer   (PR/replan)
+    cheaphelp:in-review, new human feedback   -> rework    (address review, push, re-request review)
 """
 
 from __future__ import annotations
@@ -79,6 +78,8 @@ def classify(issue: Issue, comments: list, bot_login: str, config: Config) -> st
     # Terminal / waiting-on-human states: leave alone, in precedence order.
     if lab["rejected"] in labels:
         return "rejected"
+    # in-review always maps to rework; the no-op "is there new feedback?" check
+    # lives in _run_rework so classify() stays GitHub-free.
     if lab["in_review"] in labels:
         return "rework"
     if lab["needs_human"] in labels:
@@ -315,18 +316,24 @@ def _run_build(gh, workspace, config, repo, issue, token, log, report) -> None: 
 
 def _run_rework(gh, workspace, config, repo, number, token, log, report) -> None:  # noqa: ANN001
     """Rework stage: respond to unaddressed PR review feedback."""
-    log(f"  · {repo.slug}#{number}: running rework ({config.model_for('rework')})")
-    res = rework.run_rework(gh, workspace, config, repo, number, token=token)
-    report.turns_taken += 1
-    action = f"#{number}: rework {res.status}"
-    if res.error:
-        action += f" ({res.error})"
-    if res.committed:
-        action += " +commit"
-    if res.pushed:
-        action += " +push"
-    report.actions.append(action)
-    log(f"  > {repo.slug}{action}")
+    try:
+        log(f"  · {repo.slug}#{number}: running rework ({config.model_for('rework')})…")
+        res = rework.run_rework(gh, workspace, config, repo, number, token=token)
+        action = f"#{number}: rework {res.status}"
+        if res.error:
+            action += f" ({res.error})"
+        if res.committed:
+            action += " +commit"
+        if res.pushed:
+            action += " +push"
+        report.actions.append(action)
+        log(f"  > {repo.slug}{action}")
+        # Only count turns for statuses that did actual work; no_feedback is a free no-op.
+        if res.status in ("done", "escalated", "blocked"):
+            report.turns_taken += 1
+    except Exception as exc:  # noqa: BLE001
+        log(f"  ! {repo.slug}#{number}: rework crashed: {_short_exc(exc)}")
+        report.actions.append(f"#{number}: rework error")
 
 
 def _process_repo(

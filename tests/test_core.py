@@ -1226,7 +1226,7 @@ def test_rev_parse_returns_sha(tmp_path: Path) -> None:
 
 # --- rework ------------------------------------------------------------------
 
-from cheaphelp._internal.rework import run_rework  # noqa: E402
+from cheaphelp._internal.rework import ReworkResult, run_rework  # noqa: E402
 
 
 class _ReworkFakeGH:
@@ -1399,7 +1399,9 @@ def test_rework_runs_agent_and_pushes_on_done(
     monkeypatch.setattr(gitutil, "_run", lambda *a, **k: old_ts if "log" in str(a[0]) else "newsha456")
     monkeypatch.setattr(gitutil, "ensure_work_clone", lambda *_a, **_k: tmp_path)
     monkeypatch.setattr(
-        gitutil, "diff_against_base", lambda *_a, **_k: ("M\tsrc/main.py", "diff --git a/src/main.py b/src/main.py"),
+        gitutil,
+        "diff_against_base",
+        lambda *_a, **_k: ("M\tsrc/main.py", "diff --git a/src/main.py b/src/main.py"),
     )
     monkeypatch.setattr(gitutil, "commit_all", lambda *_a, **_k: True)
     monkeypatch.setattr(gitutil, "rev_parse", lambda *_a, **_k: "newsha456")
@@ -1625,3 +1627,109 @@ def test_rework_honors_gh_no_push_alias(
     loaded = pr_state.load_pr_state(issue_dir)
     assert loaded is not None
     assert loaded["last_push_sha"] == "newsha"
+
+
+# --- rework stage integration (orchestrator dispatch) -----------------------
+
+
+class _ReworkProcessRepoGH:
+    """Minimal GitHub stand-in for _process_repo rework-stage tests."""
+
+    def __init__(self, label: str) -> None:
+        self._issue = Issue(number=1, title="t", body="b", state="open", labels=[label], user="human", html_url="")
+
+    def list_open_issues(self, _owner: str, _name: str) -> list[Issue]:
+        return [self._issue]
+
+    def list_issue_comments(self, _owner: str, _name: str, _number: int) -> list[Comment]:
+        return []
+
+    def get_issue(self, _owner: str, _name: str, _number: int) -> Issue:
+        return self._issue
+
+    def authenticated_login(self) -> str:
+        return "mybot"
+
+
+def test_process_repo_rework_stage_done(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Rework stage runs and counts as a turn when status is 'done'."""
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    monkeypatch.setenv("CHEAPHELP_AGENT_MOCK", "/dev/null")
+    repo = RepoEntry(owner="octocat", name="hello")
+    lab = Config().labels
+
+    # Pre-write pr_state.json.
+    issue_dir = ws.issue_dir(repo.owner, repo.name, 1)
+    issue_dir.mkdir(parents=True, exist_ok=True)
+    _make_pr_state(issue_dir, last_push_sha="abc123", rework_attempts=0)
+
+    gh = _ReworkProcessRepoGH(lab["in_review"])
+
+    monkeypatch.setattr(
+        orchestrator.rework,
+        "run_rework",
+        lambda *_a, **_k: ReworkResult(number=1, status="done", committed=True, pushed=True, summary="fixed"),
+    )
+
+    report = _process_repo(
+        gh,  # ty: ignore[invalid-argument-type]
+        ws,
+        Config(),
+        repo,
+        "mybot",
+        "token",
+        dry_run=False,
+        log=lambda _m: None,
+    )
+    assert report.turns_taken == 1
+    assert any("#1: rework done" in a for a in report.actions)
+    assert any("+commit" in a for a in report.actions)
+    assert any("+push" in a for a in report.actions)
+
+
+def test_process_repo_rework_stage_no_feedback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Rework stage is a free no-op when there's no new feedback."""
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    monkeypatch.setenv("CHEAPHELP_AGENT_MOCK", "/dev/null")
+    repo = RepoEntry(owner="octocat", name="hello")
+    lab = Config().labels
+
+    # Pre-write pr_state.json.
+    issue_dir = ws.issue_dir(repo.owner, repo.name, 1)
+    issue_dir.mkdir(parents=True, exist_ok=True)
+    _make_pr_state(issue_dir, last_push_sha="abc123", rework_attempts=0)
+
+    gh = _ReworkProcessRepoGH(lab["in_review"])
+
+    monkeypatch.setattr(
+        orchestrator.rework,
+        "run_rework",
+        lambda *_a, **_k: ReworkResult(number=1, status="no_feedback"),
+    )
+
+    report = _process_repo(
+        gh,  # ty: ignore[invalid-argument-type]
+        ws,
+        Config(),
+        repo,
+        "mybot",
+        "token",
+        dry_run=False,
+        log=lambda _m: None,
+    )
+    assert report.turns_taken == 0  # no_feedback is a free no-op
+    assert any("#1: rework no_feedback" in a for a in report.actions)
+
+
+def test_classify_in_review_returns_rework() -> None:
+    """An issue with only the in_review label always classifies to rework."""
+    cfg = Config()
+    assert classify(_issue_with([cfg.labels["in_review"]]), [], "bot", cfg) == "rework"
