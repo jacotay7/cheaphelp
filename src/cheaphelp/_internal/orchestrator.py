@@ -20,7 +20,7 @@ import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from cheaphelp._internal import gitutil, opencode, planner, responder, reviewer, worker
+from cheaphelp._internal import cleanup, gitutil, opencode, planner, responder, reviewer, worker
 from cheaphelp._internal.config import Config, Workspace
 from cheaphelp._internal.env import GITHUB_TOKEN_KEY, OPENROUTER_API_KEY, load_into_environ
 from cheaphelp._internal.github import GitHubClient, Issue
@@ -99,6 +99,7 @@ class RepoReport:
     slug: str
     issues_considered: int = 0
     issues_skipped: int = 0  # locked by a concurrent tick
+    clones_pruned: int = 0  # build clones removed for closed issues
     turns_taken: int = 0
     actions: list[str] = field(default_factory=list)
     error: str | None = None
@@ -333,6 +334,13 @@ def _process_repo(
         return report
 
     open_numbers = {issue.number for issue in issues}
+
+    # Reclaim disk: drop build clones for issues that have since closed. State is
+    # kept. Guarded by each issue's lock so it can't race a concurrent tick.
+    if config.prune_work_clones:
+        pruned = cleanup.prune_repo_work_clones(workspace, repo, open_numbers, dry_run=dry_run, log=log)
+        report.clones_pruned = len(pruned)
+
     work: list[tuple[str, Issue, list]] = []
     for issue in issues:
         comments = gh.list_issue_comments(repo.owner, repo.name, issue.number)

@@ -162,6 +162,18 @@ def get_parser() -> argparse.ArgumentParser:
         help="List open issues for each enabled repo and their pipeline stage.",
     ).set_defaults(func=commands.cmd_status)
 
+    # clean
+    p_clean = subparsers.add_parser(
+        "clean",
+        help="Remove build clones for closed issues and unregistered repos (keeps state).",
+    )
+    p_clean.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Report what would be removed without deleting anything.",
+    )
+    p_clean.set_defaults(func=commands.cmd_clean)
+
     return parser
 
 

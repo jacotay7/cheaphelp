@@ -68,6 +68,7 @@ All product code is under `src/cheaphelp/_internal/`:
 | `tasks.py` | task manifest + per-issue task-state store |
 | `responder.py` / `planner.py` / `worker.py` / `reviewer.py` | per-role turn logic |
 | `orchestrator.py` | one tick of the state machine (`tick()`, `classify()`, stage dispatch) |
+| `cleanup.py` | prune build clones for closed issues / unregistered repos (keeps state) |
 | `systemd.py` | user service + timer install |
 | `commands.py` / `cli.py` | argparse CLI (`cmd_*` per subcommand) |
 

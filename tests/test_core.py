@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from cheaphelp._internal import gitutil, opencode, orchestrator, planner, systemd, worker
+from cheaphelp._internal import cleanup, gitutil, opencode, orchestrator, planner, systemd, worker
 from cheaphelp._internal.config import DEFAULT_AGENT_TIMEOUT, DEFAULT_MODELS, Config, Workspace
 from cheaphelp._internal.env import parse_env, read_env_file, update_env_file
 from cheaphelp._internal.github import Comment, Issue
@@ -89,6 +89,81 @@ def test_max_task_attempts_default_and_roundtrip() -> None:
     cfg = Config.from_dict({"max_task_attempts": 4})
     assert cfg.max_task_attempts == 4
     assert Config.from_dict(cfg.to_dict()).max_task_attempts == 4
+
+
+def test_prune_work_clones_default_and_roundtrip() -> None:
+    assert Config().prune_work_clones is True
+    assert Config.from_dict({}).prune_work_clones is True
+    cfg = Config.from_dict({"prune_work_clones": False})
+    assert cfg.prune_work_clones is False
+    assert Config.from_dict(cfg.to_dict()).prune_work_clones is False
+
+
+def _make_clone(ws: Workspace, name: str) -> Path:
+    """Create a fake clone directory (with a .git marker) under the workspace."""
+    path = ws.clones_dir / name
+    (path / ".git").mkdir(parents=True)
+    return path
+
+
+def test_iter_issue_work_clones(tmp_path: Path) -> None:
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    _make_clone(ws, "octocat__hello")  # shared clone: excluded
+    _make_clone(ws, "octocat__hello__issue-1")
+    _make_clone(ws, "octocat__hello__issue-12")
+    _make_clone(ws, "octocat__other__issue-3")  # different repo: excluded
+    assert set(cleanup.iter_issue_work_clones(ws, "octocat", "hello")) == {1, 12}
+
+
+def test_prune_repo_work_clones_removes_closed_keeps_live(tmp_path: Path) -> None:
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    repo = RepoEntry(owner="octocat", name="hello")
+    for n in (1, 2, 3):
+        _make_clone(ws, f"octocat__hello__issue-{n}")
+
+    removed = cleanup.prune_repo_work_clones(ws, repo, {2})  # only #2 is still open
+    assert sorted(removed) == [1, 3]
+    assert not (ws.clones_dir / "octocat__hello__issue-1").exists()
+    assert (ws.clones_dir / "octocat__hello__issue-2").exists()
+    assert not (ws.clones_dir / "octocat__hello__issue-3").exists()
+
+
+def test_prune_repo_work_clones_dry_run_keeps_files(tmp_path: Path) -> None:
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    repo = RepoEntry(owner="octocat", name="hello")
+    _make_clone(ws, "octocat__hello__issue-9")
+    removed = cleanup.prune_repo_work_clones(ws, repo, set(), dry_run=True)
+    assert removed == [9]
+    assert (ws.clones_dir / "octocat__hello__issue-9").exists()  # reported, not deleted
+
+
+def test_prune_repo_work_clones_skips_locked(tmp_path: Path) -> None:
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    repo = RepoEntry(owner="octocat", name="hello")
+    _make_clone(ws, "octocat__hello__issue-5")
+    # A concurrent tick holds the issue lock -> pruning leaves it alone.
+    with RunLock(ws.issue_lock_path("octocat", "hello", 5)) as held:
+        assert held.acquired
+        removed = cleanup.prune_repo_work_clones(ws, repo, set())
+    assert removed == []
+    assert (ws.clones_dir / "octocat__hello__issue-5").exists()
+
+
+def test_prune_orphan_clones(tmp_path: Path) -> None:
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    _make_clone(ws, "octocat__hello")
+    _make_clone(ws, "octocat__hello__issue-1")
+    _make_clone(ws, "ghost__repo")
+    _make_clone(ws, "ghost__repo__issue-2")
+    removed = cleanup.prune_orphan_clones(ws, [RepoEntry(owner="octocat", name="hello")])
+    assert set(removed) == {"ghost__repo", "ghost__repo__issue-2"}
+    assert (ws.clones_dir / "octocat__hello").exists()  # registered: kept
+    assert (ws.clones_dir / "octocat__hello__issue-1").exists()
 
 
 class _FakeGitHub:
