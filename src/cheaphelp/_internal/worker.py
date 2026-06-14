@@ -25,7 +25,7 @@ def branch_name(number: int) -> str:
     return f"cheaphelp/issue-{number}"
 
 
-def build_prompt(task: Task, issue_md: str) -> str:
+def build_prompt(task: Task, issue_md: str, *, conventions: str = "") -> str:
     """Render the worker's user message for a single task.
 
     The worker implements and lightly verifies one task; it does NOT run the
@@ -34,24 +34,32 @@ def build_prompt(task: Task, issue_md: str) -> str:
     (and possibly expensive, e.g. multi-version) check is not repeated after
     every task.
     """
-    return "\n".join(
-        [
-            "You are implementing ONE task that is part of a larger issue.",
+    lines = [
+        "You are implementing ONE task that is part of a larger issue.",
+        "",
+        "## Issue context (for background only — do not implement the whole issue)",
+        "",
+        issue_md.strip() or "_(no spec)_",
+        "",
+        "## Your task",
+        "",
+        task.to_markdown(),
+    ]
+    if conventions.strip():
+        lines += [
             "",
-            "## Issue context (for background only — do not implement the whole issue)",
+            "## Repository conventions",
             "",
-            issue_md.strip() or "_(no spec)_",
-            "",
-            "## Your task",
-            "",
-            task.to_markdown(),
-            "",
-            "---",
-            "",
-            "Implement this task in the working directory, verify it, then report "
-            "following your output protocol (a single json block).",
-        ],
-    )
+            conventions.rstrip(),
+        ]
+    lines += [
+        "",
+        "---",
+        "",
+        "Implement this task in the working directory, verify it, then report "
+        "following your output protocol (a single json block).",
+    ]
+    return "\n".join(lines)
 
 
 @dataclass

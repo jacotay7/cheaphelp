@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from cheaphelp._internal import cleanup, gitutil, opencode, orchestrator, planner, systemd, worker
+from cheaphelp._internal import cleanup, gitutil, opencode, orchestrator, planner, reviewer, systemd, worker
 from cheaphelp._internal.config import DEFAULT_AGENT_TIMEOUT, DEFAULT_MODELS, Config, Workspace
 from cheaphelp._internal.conventions import CONVENTIONS_FILES, read_conventions
 from cheaphelp._internal.env import parse_env, read_env_file, update_env_file
@@ -24,7 +24,7 @@ from cheaphelp._internal.responder import (
     is_bot_comment,
     needs_turn,
 )
-from cheaphelp._internal.tasks import BLOCKED, DONE, PENDING, TaskStore
+from cheaphelp._internal.tasks import BLOCKED, DONE, PENDING, Task, TaskStore
 
 
 # --- config / workspace ----------------------------------------------------
@@ -656,6 +656,8 @@ def test_build_prompt_includes_thread() -> None:
     assert "Issue #42" in prompt
     assert "@alice" in prompt
     assert "hi" in prompt
+    # Back-compat: omitted conventions kwarg does not emit a section.
+    assert "## Repository conventions" not in prompt
 
 
 def test_attribution_header_names_agent_and_model() -> None:
@@ -687,6 +689,68 @@ def test_build_prompt_strips_attribution_header_from_thread() -> None:
     assert ATTRIBUTION_PREFIX not in prompt
     assert BOT_MARKER not in prompt
     assert "an earlier question" in prompt
+
+
+# --- conventions injection into build_prompt --------------------------------
+
+
+def test_responder_build_prompt_with_conventions() -> None:
+    prompt = build_prompt(
+        _issue(number=1),
+        [_comment("hello", "alice")],
+        "mybot",
+        conventions="house rules: no emoji",
+    )
+    assert "## Repository conventions" in prompt
+    assert "house rules: no emoji" in prompt
+
+
+def test_planner_build_prompt_with_conventions() -> None:
+    prompt = planner.build_prompt("spec body", conventions="house rules: no emoji")
+    assert "## Repository conventions" in prompt
+    assert "house rules: no emoji" in prompt
+
+
+def test_worker_build_prompt_with_conventions() -> None:
+    prompt = worker.build_prompt(
+        Task(id="t1", title="Do the thing"),
+        "spec body",
+        conventions="house rules: no emoji",
+    )
+    assert "## Repository conventions" in prompt
+    assert "house rules: no emoji" in prompt
+
+
+def test_reviewer_build_prompt_with_conventions() -> None:
+    prompt = reviewer.build_prompt(
+        "spec",
+        "M file.py",
+        "diff --git a/file.py b/file.py",
+        "### t1: done\nok",
+        conventions="house rules: no emoji",
+    )
+    assert "## Repository conventions" in prompt
+    assert "house rules: no emoji" in prompt
+
+
+def test_planner_build_prompt_no_conventions_by_default() -> None:
+    prompt = planner.build_prompt("spec body")
+    assert "## Repository conventions" not in prompt
+
+
+def test_worker_build_prompt_no_conventions_by_default() -> None:
+    prompt = worker.build_prompt(Task(id="t1", title="x"), "spec")
+    assert "## Repository conventions" not in prompt
+
+
+def test_reviewer_build_prompt_no_conventions_by_default() -> None:
+    prompt = reviewer.build_prompt("spec", "M f.py", "diff", "summary")
+    assert "## Repository conventions" not in prompt
+
+
+def test_build_prompt_conventions_whitespace_only() -> None:
+    prompt = build_prompt(_issue(), [], "bot", conventions="   ")
+    assert "## Repository conventions" not in prompt
 
 
 # --- opencode --------------------------------------------------------------

@@ -32,38 +32,46 @@ def _collect_summaries(store: TaskStore) -> str:
     return "\n\n".join(parts)
 
 
-def build_prompt(issue_md: str, name_status: str, full_diff: str, summaries: str) -> str:
+def build_prompt(issue_md: str, name_status: str, full_diff: str, summaries: str, *, conventions: str = "") -> str:
     """Render the reviewer's user message."""
     diff = full_diff
     if len(diff) > _MAX_DIFF_CHARS:
         diff = diff[:_MAX_DIFF_CHARS] + "\n\n... (diff truncated) ...\n"
-    return "\n".join(
-        [
-            "## Original specification (issues.md)",
+    lines = [
+        "## Original specification (issues.md)",
+        "",
+        issue_md.strip() or "_(no spec)_",
+        "",
+        "## Task summaries",
+        "",
+        summaries or "_(none)_",
+        "",
+        "## Changed files",
+        "",
+        "```",
+        name_status or "(no changes)",
+        "```",
+        "",
+        "## Full diff (branch vs base)",
+        "",
+        "```diff",
+        diff or "(empty)",
+        "```",
+    ]
+    if conventions.strip():
+        lines += [
             "",
-            issue_md.strip() or "_(no spec)_",
+            "## Repository conventions",
             "",
-            "## Task summaries",
-            "",
-            summaries or "_(none)_",
-            "",
-            "## Changed files",
-            "",
-            "```",
-            name_status or "(no changes)",
-            "```",
-            "",
-            "## Full diff (branch vs base)",
-            "",
-            "```diff",
-            diff or "(empty)",
-            "```",
-            "",
-            "---",
-            "",
-            "Review the combined result and decide, following your output protocol (a single json block).",
-        ],
-    )
+            conventions.rstrip(),
+        ]
+    lines += [
+        "",
+        "---",
+        "",
+        "Review the combined result and decide, following your output protocol (a single json block).",
+    ]
+    return "\n".join(lines)
 
 
 @dataclass
