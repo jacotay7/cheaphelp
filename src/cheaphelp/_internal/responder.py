@@ -79,7 +79,7 @@ def needs_turn(issue: Issue, comments: list[Comment], bot_login: str, config: Co
     return not is_bot_comment(last, bot_login)
 
 
-def build_prompt(issue: Issue, comments: list[Comment], bot_login: str) -> str:
+def build_prompt(issue: Issue, comments: list[Comment], bot_login: str, *, conventions: str = "") -> str:
     """Render the conversation into the user message handed to the agent."""
     lines = [
         f"# Issue #{issue.number}: {issue.title}",
@@ -106,6 +106,13 @@ def build_prompt(issue: Issue, comments: list[Comment], bot_login: str) -> str:
             lines.append("")
             lines.append(body)
             lines.append("")
+    if conventions.strip():
+        lines += [
+            "",
+            "## Repository conventions",
+            "",
+            conventions.rstrip(),
+        ]
     lines.extend(
         [
             "---",

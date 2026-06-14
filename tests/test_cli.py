@@ -1098,3 +1098,160 @@ def test_logs_follow_exits_cleanly_on_keyboard_interrupt(
     args = SimpleNamespace(home=str(ws.home), follow=True, issue=None)
     rc = commands.cmd_logs(args)
     assert rc == 0
+
+
+# --- blast-radius CLI flags ------------------------------------------------
+def test_repo_add_stores_max_diff_files_and_lines(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """`repo add --max-diff-files 50 --max-diff-lines 2000` stores both fields."""
+    ws = _setup_workspace(tmp_path)
+    rc = main(
+        [
+            "--home",
+            str(ws.home),
+            "repo",
+            "add",
+            "octocat/hello",
+            "--max-diff-files",
+            "50",
+            "--max-diff-lines",
+            "2000",
+        ],
+    )
+    assert rc == 0
+    capsys.readouterr()  # discard output
+
+    entry = Registry(ws.registry_path).find("octocat", "hello")
+    assert entry is not None
+    assert entry.max_diff_files == 50
+    assert entry.max_diff_lines == 2000
+
+
+def test_repo_add_default_limits_when_unspecified(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """`repo add` without flags uses the RepoEntry defaults (30, 1000)."""
+    ws = _setup_workspace(tmp_path)
+    rc = main(["--home", str(ws.home), "repo", "add", "octocat/hello"])
+    assert rc == 0
+    capsys.readouterr()
+
+    entry = Registry(ws.registry_path).find("octocat", "hello")
+    assert entry is not None
+    assert entry.max_diff_files == 30
+    assert entry.max_diff_lines == 1000
+
+
+def test_repo_update_updates_max_diff_files(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """`repo update --max-diff-files 100` changes only that field."""
+    ws = _setup_workspace(tmp_path)
+    Registry(ws.registry_path).add(
+        RepoEntry(
+            owner="octocat",
+            name="hello",
+            checks="ruff check",
+            autofix="ruff format",
+            max_diff_files=30,
+            max_diff_lines=1000,
+        ),
+    )
+    rc = main(
+        [
+            "--home",
+            str(ws.home),
+            "repo",
+            "update",
+            "octocat/hello",
+            "--max-diff-files",
+            "100",
+        ],
+    )
+    assert rc == 0
+    capsys.readouterr()
+
+    entry = Registry(ws.registry_path).find("octocat", "hello")
+    assert entry is not None
+    assert entry.max_diff_files == 100
+    assert entry.max_diff_lines == 1000
+    assert entry.checks == "ruff check"
+    assert entry.autofix == "ruff format"
+
+
+def test_repo_update_updates_max_diff_lines_and_preserves_others(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """`repo update --max-diff-lines 0` sets unlimited, preserves other fields."""
+    ws = _setup_workspace(tmp_path)
+    Registry(ws.registry_path).add(
+        RepoEntry(
+            owner="octocat",
+            name="hello",
+            checks="ruff check",
+            autofix="ruff format",
+            max_diff_files=30,
+            max_diff_lines=1000,
+        ),
+    )
+    rc = main(
+        [
+            "--home",
+            str(ws.home),
+            "repo",
+            "update",
+            "octocat/hello",
+            "--max-diff-lines",
+            "0",
+        ],
+    )
+    assert rc == 0
+    capsys.readouterr()
+
+    entry = Registry(ws.registry_path).find("octocat", "hello")
+    assert entry is not None
+    assert entry.max_diff_lines == 0
+    assert entry.max_diff_files == 30
+    assert entry.checks == "ruff check"
+    assert entry.autofix == "ruff format"
+
+
+def test_repo_set_with_new_flags_still_works(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """`repo set --max-diff-files 75` forwards the flag correctly."""
+    ws = _setup_workspace(tmp_path)
+    Registry(ws.registry_path).add(
+        RepoEntry(
+            owner="octocat",
+            name="hello",
+            checks="old-checks",
+            autofix="old-autofix",
+        ),
+    )
+    rc = main(
+        [
+            "--home",
+            str(ws.home),
+            "repo",
+            "set",
+            "octocat/hello",
+            "--max-diff-files",
+            "75",
+        ],
+    )
+    assert rc == 0
+    capsys.readouterr()
+
+    entry = Registry(ws.registry_path).find("octocat", "hello")
+    assert entry is not None
+    assert entry.max_diff_files == 75
+    assert entry.max_diff_lines == 1000
+    assert entry.checks == "old-checks"
+    assert entry.autofix == "old-autofix"

@@ -126,6 +126,8 @@ def cmd_repo_add(args: argparse.Namespace) -> int:
         print("Warning: no GITHUB_TOKEN set; adding without verification.", file=sys.stderr)
 
     registry = Registry(ws.registry_path)
+    mdf = getattr(args, "max_diff_files", None)
+    mdl = getattr(args, "max_diff_lines", None)
     added = registry.add(
         RepoEntry(
             owner=owner,
@@ -133,6 +135,8 @@ def cmd_repo_add(args: argparse.Namespace) -> int:
             default_branch=default_branch,
             autofix=getattr(args, "autofix", "") or "",
             checks=getattr(args, "checks", "") or "",
+            max_diff_files=30 if mdf is None else mdf,
+            max_diff_lines=1000 if mdl is None else mdl,
         ),
     )
     if not added:
@@ -200,11 +204,15 @@ def cmd_repo_set(args: argparse.Namespace) -> int:
         print(str(exc), file=sys.stderr)
         return 2
 
-    updates: dict[str, str] = {}
+    updates: dict[str, str | int] = {}
     if getattr(args, "checks", None) is not None:
         updates["checks"] = args.checks
     if getattr(args, "autofix", None) is not None:
         updates["autofix"] = args.autofix
+    if getattr(args, "max_diff_files", None) is not None:
+        updates["max_diff_files"] = args.max_diff_files
+    if getattr(args, "max_diff_lines", None) is not None:
+        updates["max_diff_lines"] = args.max_diff_lines
 
     if not updates:
         print(f"Nothing to update for {owner}/{name}.")
