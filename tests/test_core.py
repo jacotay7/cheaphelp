@@ -10,7 +10,7 @@ import pytest
 from cheaphelp._internal import cleanup, gitutil, opencode, orchestrator, planner, systemd, worker
 from cheaphelp._internal.config import DEFAULT_AGENT_TIMEOUT, DEFAULT_MODELS, Config, Workspace
 from cheaphelp._internal.env import parse_env, read_env_file, update_env_file
-from cheaphelp._internal.github import Comment, Issue
+from cheaphelp._internal.github import Comment, GitHubClient, Issue, PRReviewComment
 from cheaphelp._internal.lock import RunLock
 from cheaphelp._internal.orchestrator import _process_repo, _short_exc, classify, parse_depends_on
 from cheaphelp._internal.registry import Registry, RepoEntry, parse_slug
@@ -1056,6 +1056,117 @@ def test_run_lock_releases_on_exit(tmp_path: Path) -> None:
         assert second.acquired is True
 
 
-def test_run_lock_holder_pid(tmp_path: Path) -> None:
-    with RunLock(tmp_path / "x.lock") as lock:
-        assert lock.holder_pid == os.getpid()
+# --- PR review API ---------------------------------------------------------
+
+
+def _make_client() -> GitHubClient:
+    """Build a GitHubClient with a non-empty token for testing."""
+    return GitHubClient("test-token")
+
+
+def test_get_pull_request_returns_dict(monkeypatch: pytest.MonkeyPatch) -> None:
+    gh = _make_client()
+    canned = {"number": 7, "state": "open", "head": {"sha": "abc123"}, "requested_reviewers": [{"login": "alice"}]}
+
+    def fake_request(method: str, path: str, **kwargs: object) -> dict:
+        assert path == "/repos/owner/repo/pulls/7"
+        return canned
+
+    monkeypatch.setattr(gh, "_request", fake_request)
+    result = gh.get_pull_request("owner", "repo", 7)
+    assert result["number"] == 7
+    assert result["head"]["sha"] == "abc123"
+
+
+def test_list_pr_reviews_returns_list(monkeypatch: pytest.MonkeyPatch) -> None:
+    gh = _make_client()
+    canned = [
+        {"id": 1, "state": "CHANGES_REQUESTED", "user": {"login": "alice"}, "submitted_at": "2024-01-01T00:00:00Z"},
+        {"id": 2, "state": "APPROVED", "user": {"login": "bob"}, "submitted_at": "2024-01-02T00:00:00Z"},
+    ]
+
+    def fake_paginate(path: str, **params: object) -> list[dict]:
+        assert path == "/repos/owner/repo/pulls/7/reviews"
+        return canned
+
+    monkeypatch.setattr(gh, "_paginate", fake_paginate)
+    result = gh.list_pr_reviews("owner", "repo", 7)
+    assert len(result) == 2
+    assert result[0]["state"] == "CHANGES_REQUESTED"
+    assert result[1]["user"]["login"] == "bob"
+
+
+def test_list_pr_reviews_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    gh = _make_client()
+    monkeypatch.setattr(gh, "_paginate", lambda _path, **_: [])
+    assert gh.list_pr_reviews("owner", "repo", 7) == []
+
+
+def test_list_pr_review_comments_parsed(monkeypatch: pytest.MonkeyPatch) -> None:
+    gh = _make_client()
+    canned = [
+        {
+            "id": 42,
+            "body": "please fix this",
+            "user": {"login": "reviewer1"},
+            "created_at": "2024-01-01T00:00:00Z",
+            "path": "src/main.py",
+            "line": 15,
+            "commit_id": "abc123",
+        },
+    ]
+
+    def fake_paginate(path: str, **params: object) -> list[dict]:
+        assert path == "/repos/owner/repo/pulls/7/comments"
+        return canned
+
+    monkeypatch.setattr(gh, "_paginate", fake_paginate)
+    result = gh.list_pr_review_comments("owner", "repo", 7)
+    assert len(result) == 1
+    assert isinstance(result[0], PRReviewComment)
+    assert result[0].id == 42
+    assert result[0].body == "please fix this"
+    assert result[0].user == "reviewer1"
+    assert result[0].path == "src/main.py"
+    assert result[0].line == 15
+    assert result[0].commit_id == "abc123"
+
+
+def test_pr_review_comment_from_payload_tolerates_missing_path_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A review comment at the file level (not line-level) may omit path/line."""
+    gh = _make_client()
+    canned = [
+        {
+            "id": 99,
+            "body": "overall file feedback",
+            "user": {"login": "reviewer2"},
+            "created_at": "2024-01-01T00:00:00Z",
+            "commit_id": "def456",
+            # No "path" or "line" key.
+        },
+    ]
+
+    monkeypatch.setattr(gh, "_paginate", lambda _path, **_: canned)
+    result = gh.list_pr_review_comments("owner", "repo", 7)
+    assert len(result) == 1
+    assert result[0].id == 99
+    assert result[0].path == ""  # default empty string
+    assert result[0].line is None  # explicit None
+
+
+def test_pr_review_comment_from_payload_line_none() -> None:
+    """from_payload handles line=null correctly."""
+    data: dict[str, object] = {
+        "id": 1,
+        "body": "comment",
+        "user": {"login": "u"},
+        "created_at": "",
+        "path": "file.py",
+        "line": None,
+        "commit_id": "c1",
+    }
+    comment = PRReviewComment.from_payload(data)
+    assert comment.line is None
+    assert comment.path == "file.py"

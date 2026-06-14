@@ -56,6 +56,31 @@ class Issue:
 
 
 @dataclass
+class PRReviewComment:
+    """A single PR review comment (inline code review feedback)."""
+
+    id: int
+    body: str
+    user: str
+    created_at: str
+    path: str
+    line: int | None
+    commit_id: str
+
+    @classmethod
+    def from_payload(cls, data: dict[str, Any]) -> PRReviewComment:
+        return cls(
+            id=int(data["id"]),
+            body=data.get("body") or "",
+            user=(data.get("user") or {}).get("login", ""),
+            created_at=data.get("created_at", ""),
+            path=data.get("path", ""),
+            line=data.get("line"),
+            commit_id=data.get("commit_id", ""),
+        )
+
+
+@dataclass
 class Comment:
     """A single issue comment."""
 
@@ -247,3 +272,16 @@ class GitHubClient:
         except GitHubError:
             return False
         return True
+
+    def get_pull_request(self, owner: str, repo: str, pr_number: int) -> dict[str, Any]:
+        """Return the full PR payload (head.sha, state, requested_reviewers, etc.)."""
+        return self._request("GET", f"/repos/{owner}/{repo}/pulls/{pr_number}")
+
+    def list_pr_reviews(self, owner: str, repo: str, pr_number: int) -> list[dict[str, Any]]:
+        """List formal PR reviews (APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED)."""
+        return self._paginate(f"/repos/{owner}/{repo}/pulls/{pr_number}/reviews")
+
+    def list_pr_review_comments(self, owner: str, repo: str, pr_number: int) -> list[PRReviewComment]:
+        """List inline PR review comments, parsed into PRReviewComment objects."""
+        raw = self._paginate(f"/repos/{owner}/{repo}/pulls/{pr_number}/comments")
+        return [PRReviewComment.from_payload(item) for item in raw]
