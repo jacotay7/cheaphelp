@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import os
+import random
+from collections.abc import Callable
 from pathlib import Path
+from unittest.mock import patch
 
+import httpx
 import pytest
 
 from cheaphelp._internal import cleanup, gitutil, opencode, orchestrator, planner, systemd, worker
 from cheaphelp._internal.config import DEFAULT_AGENT_TIMEOUT, DEFAULT_MODELS, Config, Workspace
 from cheaphelp._internal.env import parse_env, read_env_file, update_env_file
-from cheaphelp._internal.github import Comment, Issue
+from cheaphelp._internal.github import Comment, GitHubClient, GitHubError, Issue
 from cheaphelp._internal.lock import RunLock
 from cheaphelp._internal.orchestrator import _process_repo, _short_exc, classify, parse_depends_on
 from cheaphelp._internal.registry import Registry, RepoEntry, parse_slug
@@ -121,6 +125,186 @@ def test_retry_base_delay_default_and_roundtrip() -> None:
     assert Config.from_dict(cfg.to_dict()).retry_base_delay == 2.5
     # String values are coerced via float(...).
     assert Config.from_dict({"retry_base_delay": "0.5"}).retry_base_delay == 0.5
+
+
+def _make_github_client(handler: Callable[[httpx.Request], httpx.Response], **kwargs: object) -> GitHubClient:
+    """Build a GitHubClient wired to an httpx.MockTransport (no network)."""
+    client = httpx.Client(base_url="https://api.github.com", transport=httpx.MockTransport(handler))
+    return GitHubClient("test-token", client=client, **kwargs)
+
+
+# --- GitHubClient retry tests -----------------------------------------------
+def _make_counting_handler() -> tuple[list[httpx.Response], Callable]:
+    """Return (responses, handler) — the handler pops from *responses* each call.
+
+    Pop an ``httpx.Response`` to return, or raise the item if it is an exception class.
+    """
+    items: list[httpx.Response] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return items.pop(0)
+
+    return items, handler
+
+
+def test_request_retries_on_5xx_then_succeeds() -> None:
+    items, handler = _make_counting_handler()
+    items.append(httpx.Response(503))
+    items.append(httpx.Response(503))
+    items.append(httpx.Response(200, json={"ok": True}))
+    gh = _make_github_client(handler, retry_attempts=3, retry_base_delay=0.01)
+    result = gh._request("GET", "/test")
+    assert result == {"ok": True}
+    assert len(items) == 0  # all consumed
+
+
+def test_request_retries_on_429_then_succeeds() -> None:
+    items, handler = _make_counting_handler()
+    items.append(httpx.Response(429))
+    items.append(httpx.Response(429))
+    items.append(httpx.Response(200, json={"ok": True}))
+    gh = _make_github_client(handler, retry_attempts=3, retry_base_delay=0.01)
+    result = gh._request("GET", "/test")
+    assert result == {"ok": True}
+    assert len(items) == 0
+
+
+def test_request_does_not_retry_on_404() -> None:
+    items, handler = _make_counting_handler()
+    items.append(httpx.Response(404))
+    gh = _make_github_client(handler, retry_attempts=3, retry_base_delay=0.01)
+    with pytest.raises(GitHubError) as exc_info:
+        gh._request("GET", "/test")
+    assert "404" in str(exc_info.value)
+    assert len(items) == 0
+
+
+def test_request_does_not_retry_on_422() -> None:
+    items, handler = _make_counting_handler()
+    items.append(httpx.Response(422))
+    gh = _make_github_client(handler, retry_attempts=3, retry_base_delay=0.01)
+    with pytest.raises(GitHubError) as exc_info:
+        gh._request("GET", "/test")
+    assert "422" in str(exc_info.value)
+    assert len(items) == 0
+
+
+def test_request_retries_on_connect_error() -> None:
+    calls: list[int] = []
+
+    def handler_connect(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        if len(calls) < 3:
+            raise httpx.ConnectError("connection refused")
+        return httpx.Response(200, json={"ok": True})
+
+    gh = _make_github_client(handler_connect, retry_attempts=3, retry_base_delay=0.01)
+    result = gh._request("GET", "/test")
+    assert result == {"ok": True}
+    assert len(calls) == 3
+
+
+def test_request_exhausted_retries_raises_last_error() -> None:
+    items, handler = _make_counting_handler()
+    for _ in range(4):  # one more than needed
+        items.append(httpx.Response(503))
+    gh = _make_github_client(handler, retry_attempts=3, retry_base_delay=0.01)
+    with pytest.raises(GitHubError) as exc_info:
+        gh._request("GET", "/test")
+    assert "503" in str(exc_info.value)
+
+
+def test_request_exhausted_transport_raises_last_error() -> None:
+    calls: list[int] = []
+
+    def handler_timeout(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        raise httpx.ReadTimeout("timed out")
+
+    gh = _make_github_client(handler_timeout, retry_attempts=3, retry_base_delay=0.01)
+    with pytest.raises(httpx.ReadTimeout):
+        gh._request("GET", "/test")
+    assert len(calls) == 3
+
+
+def test_request_honors_retry_after() -> None:
+    sleeps: list[float] = []
+
+    def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    items, handler = _make_counting_handler()
+    items.append(httpx.Response(429, headers={"Retry-After": "5"}))
+    items.append(httpx.Response(200, json={"ok": True}))
+    gh = _make_github_client(handler, retry_attempts=3, retry_base_delay=0.0)
+
+    with patch("time.sleep", fake_sleep):
+        result = gh._request("GET", "/test")
+    assert result == {"ok": True}
+    assert len(sleeps) == 1
+    assert sleeps[0] >= 5.0
+
+
+def test_request_honors_retry_after_caps_at_60() -> None:
+    from unittest.mock import patch
+
+    sleeps: list[float] = []
+
+    def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    items, handler = _make_counting_handler()
+    items.append(httpx.Response(429, headers={"Retry-After": "999"}))
+    items.append(httpx.Response(200, json={"ok": True}))
+    gh = _make_github_client(handler, retry_attempts=3, retry_base_delay=0.0)
+
+    with patch("time.sleep", fake_sleep):
+        result = gh._request("GET", "/test")
+    assert result == {"ok": True}
+    assert len(sleeps) == 1
+    assert sleeps[0] <= 60.0
+
+
+def test_request_no_sleep_on_last_attempt() -> None:
+    from unittest.mock import patch
+
+    sleeps: list[float] = []
+
+    def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    items, handler = _make_counting_handler()
+    for _ in range(3):
+        items.append(httpx.Response(503))
+    gh = _make_github_client(handler, retry_attempts=3, retry_base_delay=0.01)
+
+    with patch("time.sleep", fake_sleep), pytest.raises(GitHubError):
+        gh._request("GET", "/test")
+    assert len(sleeps) == 2  # retry_attempts - 1
+
+
+def test_request_backoff_is_exponential() -> None:
+    from unittest.mock import patch
+
+    random.seed(42)  # deterministic jitter
+    sleeps: list[float] = []
+
+    def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    items, handler = _make_counting_handler()
+    for _ in range(3):
+        items.append(httpx.Response(503))
+    gh = _make_github_client(handler, retry_attempts=3, retry_base_delay=1.0)
+
+    with patch("time.sleep", fake_sleep), pytest.raises(GitHubError):
+        gh._request("GET", "/test")
+    assert len(sleeps) == 2
+
+    # Attempt 1: base * 2^(0) = 1.0, jitter ±0.25
+    assert 0.75 <= sleeps[0] <= 1.25
+    # Attempt 2: base * 2^(1) = 2.0, jitter ±0.5
+    assert 1.5 <= sleeps[1] <= 2.5
 
 
 def _make_clone(ws: Workspace, name: str) -> Path:

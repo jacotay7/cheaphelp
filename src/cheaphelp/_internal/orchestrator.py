@@ -473,7 +473,11 @@ def tick(
         return report
 
     try:
-        with GitHubClient(token) as gh:
+        with GitHubClient(
+            token,
+            retry_attempts=config.retry_attempts,
+            retry_base_delay=config.retry_base_delay,
+        ) as gh:
             report.bot_login = gh.authenticated_login()
             log(f"acting as @{report.bot_login} ({'dry-run' if dry_run else 'live'})")
             for repo in repos:
