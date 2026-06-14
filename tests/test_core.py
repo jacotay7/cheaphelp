@@ -2245,7 +2245,7 @@ def test_worker_run_task_forwards_conventions(
     monkeypatch.setattr(
         opencode,
         "run_agent",
-        lambda *a, **kw: SimpleNamespace(decision={"status": "done", "summary": "ok"}),
+        lambda *a, **kw: SimpleNamespace(decision={"status": "done", "summary": "ok"}, usage=None),
     )
 
     captured: list[str] = []
@@ -2300,7 +2300,7 @@ def test_reviewer_review_issue_forwards_conventions(
     monkeypatch.setattr(
         opencode,
         "run_agent",
-        lambda *a, **kw: SimpleNamespace(decision={"decision": "open_pr", "pr_title": "x", "pr_body": "y"}),
+        lambda *a, **kw: SimpleNamespace(decision={"decision": "open_pr", "pr_title": "x", "pr_body": "y"}, usage=None),
     )
 
     captured: list[str] = []
@@ -2343,3 +2343,229 @@ def test_reviewer_review_issue_forwards_conventions(
 
     assert captured == ["SENTINEL_AGENT_RULES"]
     assert result.decision == "open_pr"
+
+
+# --- cost recording ----------------------------------------------------------
+
+
+def test_run_responder_records_cost(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_run_responder records token/cost data via _record_cost."""
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    ws.save_config(Config())
+    monkeypatch.setenv("CHEAPHELP_AGENT_MOCK", "/dev/null")  # skip clone
+
+    repo = RepoEntry(owner="octocat", name="hello")
+    issue = Issue(number=1, title="t", body="b", state="open", labels=[], user="alice", html_url="")
+
+    usage = opencode.UsageData(prompt_tokens=100, completion_tokens=50, cost_usd=0.002)
+    result = opencode.AgentResult(
+        returncode=0,
+        stdout='```json\n{"action":"comment","reply":"q?"}\n```',
+        stderr="",
+        decision={"action": "comment", "reply": "q?"},
+        usage=usage,
+    )
+    monkeypatch.setattr(opencode, "run_agent", lambda *a, **kw: result)
+
+    fake_gh = _RecordingResponderGH()
+    report = orchestrator.RepoReport(slug=repo.slug)
+
+    orchestrator._run_responder(
+        fake_gh,
+        ws,
+        Config(),
+        repo,
+        issue,
+        [],
+        "mybot",
+        tmp_path,
+        lambda _m: None,
+        report,
+    )
+
+    assert report.cost == usage
+    assert report.issue_costs[1]["responder"] == [usage]
+
+    # Verify cost.json was written and round-trips.
+    cost_path = ws.issue_dir(repo.owner, repo.name, 1) / "cost.json"
+    assert cost_path.exists()
+    loaded = IssueCostStore(ws.issue_dir(repo.owner, repo.name, 1)).load()
+    assert loaded == usage
+
+
+def test_run_responder_skips_cost_when_usage_none(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A result with usage=None is a no-op for cost recording."""
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    ws.save_config(Config())
+    monkeypatch.setenv("CHEAPHELP_AGENT_MOCK", "/dev/null")
+
+    repo = RepoEntry(owner="octocat", name="hello")
+    issue = Issue(number=1, title="t", body="b", state="open", labels=[], user="alice", html_url="")
+
+    result = opencode.AgentResult(
+        returncode=0,
+        stdout='```json\n{"action":"comment","reply":"q?"}\n```',
+        stderr="",
+        decision={"action": "comment", "reply": "q?"},
+        usage=None,
+    )
+    monkeypatch.setattr(opencode, "run_agent", lambda *a, **kw: result)
+
+    fake_gh = _RecordingResponderGH()
+    report = orchestrator.RepoReport(slug=repo.slug)
+
+    orchestrator._run_responder(
+        fake_gh,
+        ws,
+        Config(),
+        repo,
+        issue,
+        [],
+        "mybot",
+        tmp_path,
+        lambda _m: None,
+        report,
+    )
+
+    assert report.cost == opencode.UsageData()
+    assert report.issue_costs == {}
+    cost_path = ws.issue_dir(repo.owner, repo.name, 1) / "cost.json"
+    assert not cost_path.exists()
+
+
+def test_run_planner_records_cost(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_run_planner records cost from the planner agent call."""
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    ws.save_config(Config())
+    monkeypatch.setenv("CHEAPHELP_AGENT_MOCK", "/dev/null")
+
+    repo = RepoEntry(owner="octocat", name="hello")
+    issue = Issue(number=1, title="t", body="b", state="open", labels=[], user="alice", html_url="")
+
+    # Create issues.md so planner does not early-return.
+    issue_dir = ws.issue_dir(repo.owner, repo.name, issue.number)
+    issue_dir.mkdir(parents=True, exist_ok=True)
+    (issue_dir / "issues.md").write_text("# The spec", encoding="utf-8")
+
+    usage = opencode.UsageData(prompt_tokens=200, completion_tokens=100, cost_usd=0.008)
+    result = opencode.AgentResult(
+        returncode=0,
+        stdout='```json\n{"plan_summary":"plan","tasks":[{"id":"t1","title":"x"}]}\n```',
+        stderr="",
+        decision={"plan_summary": "plan", "tasks": [{"id": "t1", "title": "x"}]},
+        usage=usage,
+    )
+    monkeypatch.setattr(opencode, "run_agent", lambda *a, **kw: result)
+
+    # Mock apply_plan so it doesn't actually modify GitHub state.
+    def fake_apply_plan(*_a: object, **_kw: object) -> object:
+        from cheaphelp._internal.planner import PlanResult  # noqa: PLC0415
+        return PlanResult(number=1, task_count=1)
+
+    monkeypatch.setattr(planner, "apply_plan", fake_apply_plan)
+
+    fake_gh = _RecordingResponderGH()
+    report = orchestrator.RepoReport(slug=repo.slug)
+
+    orchestrator._run_planner(
+        fake_gh,
+        ws,
+        Config(),
+        repo,
+        issue,
+        tmp_path,
+        lambda _m: None,
+        report,
+    )
+
+    assert report.cost == usage
+    assert report.issue_costs[1]["planner"] == [usage]
+    cost_path = ws.issue_dir(repo.owner, repo.name, 1) / "cost.json"
+    assert cost_path.exists()
+    loaded = IssueCostStore(ws.issue_dir(repo.owner, repo.name, 1)).load()
+    assert loaded == usage
+
+
+def test_run_build_records_worker_and_reviewer_costs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_run_build records costs for each worker turn and the reviewer."""
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    repo = RepoEntry(owner="octocat", name="hello")
+    issue = Issue(number=1, title="t", body="b", state="open", labels=[], user="u", html_url="")
+    issue_dir = ws.issue_dir(repo.owner, repo.name, issue.number)
+    store = TaskStore(issue_dir)
+    _, tasks = planner.parse_manifest(
+        {"tasks": [{"id": "t1", "title": "one"}, {"id": "t2", "title": "two"}]},
+    )
+    store.materialize(tasks)
+
+    monkeypatch.setattr(gitutil, "ensure_work_clone", lambda *_a, **_k: None)
+    monkeypatch.setattr(gitutil, "diff_stat", lambda *_a, **_k: None)
+    monkeypatch.setattr(gitutil, "commit_all", lambda *_a, **_k: False)
+    monkeypatch.setattr(gitutil, "push_branch", lambda *_a, **_k: None)
+
+    worker_usage = opencode.UsageData(prompt_tokens=50, completion_tokens=25, cost_usd=0.001)
+
+    def fake_run_task(_ws, _cfg, _repo, number, task, _work_dir, *, token):  # noqa: ANN001, ANN202
+        TaskStore(ws.issue_dir(repo.owner, repo.name, number)).set_status(task.id, DONE, summary="ok")
+        return worker.WorkResult(task_id=task.id, status=DONE, committed=True, usage=worker_usage)
+
+    monkeypatch.setattr(worker, "run_task", fake_run_task)
+
+    reviewer_usage = opencode.UsageData(prompt_tokens=30, completion_tokens=15, cost_usd=0.002)
+
+    def fake_review_issue(*_a: object, **_kw: object) -> object:
+        return reviewer.ReviewResult(number=1, decision="open_pr", usage=reviewer_usage)
+
+    monkeypatch.setattr(reviewer, "review_issue", fake_review_issue)
+
+    gh = _RecBuildGH()
+    report = orchestrator.RepoReport(slug=repo.slug)
+    config = Config()
+    orchestrator._run_build(gh, ws, config, repo, issue, "token", lambda _m: None, report)
+
+    # Two workers + one reviewer.
+    expected_cost = worker_usage + worker_usage + reviewer_usage
+    assert report.cost == expected_cost
+    assert len(report.issue_costs[1]["worker"]) == 2
+    assert report.issue_costs[1]["worker"][0] == worker_usage
+    assert report.issue_costs[1]["worker"][1] == worker_usage
+    assert report.issue_costs[1]["reviewer"] == [reviewer_usage]
+
+
+def test_tick_report_total_cost_sums_across_repos(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """TickReport.total_cost equals the sum of RepoReport.cost across repos."""
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    ws.save_config(Config())
+    monkeypatch.setenv("CHEAPHELP_AGENT_MOCK", "/dev/null")
+
+    # Register two repos.
+    reg = Registry(ws.registry_path)
+    reg.add(RepoEntry(owner="octocat", name="hello", enabled=True))
+    reg.add(RepoEntry(owner="octocat", name="world", enabled=True))
+
+    report = orchestrator.tick(ws, log=lambda _m: None)
+
+    # Both repos have cost=UsageData() (no agent ran, mock mode /dev/null).
+    assert len(report.repos) == 2
+    assert report.total_cost == opencode.UsageData()
+    assert report.total_cost == report.repos[0].cost + report.repos[1].cost

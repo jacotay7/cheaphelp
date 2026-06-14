@@ -15,6 +15,7 @@ from cheaphelp._internal import gitutil, opencode
 from cheaphelp._internal.config import Config, Workspace
 from cheaphelp._internal.conventions import read_conventions
 from cheaphelp._internal.github import GitHubClient
+from cheaphelp._internal.opencode import UsageData
 from cheaphelp._internal.registry import RepoEntry
 from cheaphelp._internal.responder import cheaphelp_message
 from cheaphelp._internal.tasks import TaskStore
@@ -83,6 +84,7 @@ class ReviewResult:
     decision: str
     pr_url: str | None = None
     error: str | None = None
+    usage: UsageData | None = None
 
 
 def apply_review(
@@ -95,6 +97,7 @@ def apply_review(
     clone_dir: Path,
     *,
     token: str | None,
+    usage: UsageData | None = None,
 ) -> ReviewResult:
     """Act on a reviewer decision: open a PR or send back to the planner."""
     choice = str(decision.get("decision", "")).strip().lower()
@@ -105,7 +108,7 @@ def apply_review(
         if os.environ.get("CHEAPHELP_NO_PUSH"):
             # Inspection mode: don't touch the remote. Leave the issue as-is so a
             # later run (without the guard) actually opens the PR.
-            return ReviewResult(number=number, decision="open_pr (skipped: NO_PUSH)")
+            return ReviewResult(number=number, decision="open_pr (skipped: NO_PUSH)", usage=usage)
         # Make sure the branch is on the remote before opening the PR.
         gitutil.push_branch(clone_dir, repo, branch=branch, token=token)
         title = str(decision.get("pr_title") or f"cheaphelp: resolve #{number}").strip()
@@ -129,7 +132,7 @@ def apply_review(
                 body=body,
             )
         except Exception as exc:  # noqa: BLE001
-            return ReviewResult(number=number, decision=choice, error=str(exc))
+            return ReviewResult(number=number, decision=choice, error=str(exc), usage=usage)
         # Best-effort formal review request. GitHub rejects requesting the PR
         # author (common when the bot is the repo owner); the @mention above
         # still notifies them in that case.
@@ -150,7 +153,7 @@ def apply_review(
             number,
             cheaphelp_message(f"Opened a pull request for review: {pr.get('html_url', '')}", "reviewer", config),
         )
-        return ReviewResult(number=number, decision=choice, pr_url=pr.get("html_url"))
+        return ReviewResult(number=number, decision=choice, pr_url=pr.get("html_url"), usage=usage)
 
     # replan
     notes = str(decision.get("replan_notes") or "").strip()
@@ -171,7 +174,7 @@ def apply_review(
         number,
         cheaphelp_message(f"Sending this back to planning:\n\n{notes}", "reviewer", config),
     )
-    return ReviewResult(number=number, decision="replan")
+    return ReviewResult(number=number, decision="replan", usage=usage)
 
 
 def review_issue(
@@ -194,6 +197,7 @@ def review_issue(
     prompt = build_prompt(issue_md, name_status, full_diff, _collect_summaries(store), conventions=conventions)
 
     result = opencode.run_agent(workspace, config, "reviewer", prompt, cwd=clone_dir, timeout=config.agent_timeout)
+    usage = result.usage
     if result.decision is None:
-        return ReviewResult(number=number, decision="none", error="unparseable")
-    return apply_review(gh, workspace, config, repo, number, result.decision, clone_dir, token=token)
+        return ReviewResult(number=number, decision="none", error="unparseable", usage=usage)
+    return apply_review(gh, workspace, config, repo, number, result.decision, clone_dir, token=token, usage=usage)

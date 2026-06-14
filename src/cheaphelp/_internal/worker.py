@@ -15,6 +15,7 @@ from pathlib import Path
 from cheaphelp._internal import gitutil, opencode
 from cheaphelp._internal.config import Config, Workspace
 from cheaphelp._internal.conventions import read_conventions
+from cheaphelp._internal.opencode import UsageData
 from cheaphelp._internal.registry import RepoEntry
 from cheaphelp._internal.tasks import BLOCKED, DONE, PENDING, Task, TaskStore
 
@@ -71,6 +72,7 @@ class WorkResult:
     status: str
     committed: bool = False
     error: str | None = None
+    usage: UsageData | None = None
 
 
 def run_task(
@@ -91,8 +93,10 @@ def run_task(
     store.set_status(task.id, "in_progress")
     conventions = read_conventions(clone_dir)
     prompt = build_prompt(task, issue_md, conventions=conventions)
+    usage: UsageData | None = None
     try:
         result = opencode.run_agent(workspace, config, "worker", prompt, cwd=clone_dir, timeout=config.agent_timeout)
+        usage = result.usage
     except subprocess.TimeoutExpired:
         # A timeout is retryable: reset to pending and let the next tick try
         # again, escalating to blocked (-> needs-human) only after the limit.
@@ -127,4 +131,4 @@ def run_task(
     else:
         store.set_status(task.id, BLOCKED, summary=full_summary or "(blocked, no summary)")
 
-    return WorkResult(task_id=task.id, status=status or BLOCKED, committed=committed)
+    return WorkResult(task_id=task.id, status=status or BLOCKED, committed=committed, usage=usage)
