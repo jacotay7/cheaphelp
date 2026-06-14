@@ -23,7 +23,7 @@ from cheaphelp._internal.responder import (
     is_bot_comment,
     needs_turn,
 )
-from cheaphelp._internal.tasks import DONE, TaskStore
+from cheaphelp._internal.tasks import BLOCKED, DONE, PENDING, TaskStore
 
 
 # --- config / workspace ----------------------------------------------------
@@ -80,6 +80,15 @@ def test_max_tasks_per_tick_default_and_roundtrip() -> None:
     assert Config.from_dict(cfg.to_dict()).max_tasks_per_tick == 3
     # String values are coerced via int(...).
     assert Config.from_dict({"max_tasks_per_tick": "2"}).max_tasks_per_tick == 2
+
+
+def test_max_task_attempts_default_and_roundtrip() -> None:
+    # Defaults to 2 (one retry) when unset.
+    assert Config().max_task_attempts == 2
+    assert Config.from_dict({}).max_task_attempts == 2
+    cfg = Config.from_dict({"max_task_attempts": 4})
+    assert cfg.max_task_attempts == 4
+    assert Config.from_dict(cfg.to_dict()).max_task_attempts == 4
 
 
 class _FakeGitHub:
@@ -514,6 +523,55 @@ def test_extract_decision_none_when_absent() -> None:
     assert opencode.extract_decision("just prose, no json") is None
 
 
+def test_run_agent_reprompts_once_on_empty_decision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace  # noqa: PLC0415 - local to keep the module import list lean
+
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    monkeypatch.setattr(opencode, "find_opencode", lambda _cfg: Path("opencode"))
+
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **_kwargs: object) -> object:
+        calls.append(cmd)
+        # First reply has no parseable json block; the retry returns a valid one.
+        stdout = "thinking out loud, no json" if len(calls) == 1 else '```json\n{"status": "done"}\n```'
+        return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(opencode.subprocess, "run", fake_run)
+
+    result = opencode.run_agent(ws, Config(), "worker", "do it", cwd=tmp_path)
+    assert result.decision == {"status": "done"}
+    assert len(calls) == 2  # re-prompted exactly once
+    assert opencode._REPROMPT_SUFFIX in calls[1][-1]  # the reminder rode along
+
+
+def test_run_agent_no_reprompt_when_decision_present(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    monkeypatch.setattr(opencode, "find_opencode", lambda _cfg: Path("opencode"))
+
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **_kwargs: object) -> object:
+        calls.append(cmd)
+        return SimpleNamespace(returncode=0, stdout='```json\n{"status": "done"}\n```', stderr="")
+
+    monkeypatch.setattr(opencode.subprocess, "run", fake_run)
+
+    result = opencode.run_agent(ws, Config(), "worker", "do it", cwd=tmp_path)
+    assert result.decision == {"status": "done"}
+    assert len(calls) == 1  # no retry needed
+
+
 def test_build_opencode_config_shape() -> None:
     doc = opencode.build_opencode_config(Config())
     assert doc["$schema"] == opencode.OPENCODE_SCHEMA
@@ -672,6 +730,48 @@ def test_task_store_blocked(tmp_path: Path) -> None:
     store.set_status("t1", "blocked")
     assert store.is_blocked()
     assert not store.all_done()
+
+
+def test_task_store_record_attempt(tmp_path: Path) -> None:
+    store = TaskStore(tmp_path / "issue-3")
+    _, tasks = planner.parse_manifest({"tasks": [{"id": "t1", "title": "x"}]})
+    store.materialize(tasks)
+    assert store.load()[0].attempts == 0
+    assert store.record_attempt("t1") == 1
+    assert store.record_attempt("t1") == 2
+    assert store.load()[0].attempts == 2
+
+
+def test_run_task_timeout_retries_then_escalates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import subprocess  # noqa: PLC0415 - local to keep the module import list lean
+
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    repo = RepoEntry(owner="o", name="r")
+    store = TaskStore(ws.issue_dir(repo.owner, repo.name, 1))
+    _, tasks = planner.parse_manifest({"tasks": [{"id": "t1", "title": "x"}]})
+    store.materialize(tasks)
+
+    def boom(*_args: object, **_kwargs: object) -> object:
+        raise subprocess.TimeoutExpired(cmd="opencode", timeout=1.0)
+
+    monkeypatch.setattr(opencode, "run_agent", boom)
+    cfg = Config.from_dict({"max_task_attempts": 2})
+
+    # First timeout: reset to pending and retry next tick (not escalated yet).
+    res1 = worker.run_task(ws, cfg, repo, 1, store.load()[0], tmp_path, token=None)
+    assert res1.status == "timeout"
+    assert store.load()[0].status == PENDING
+    assert store.load()[0].attempts == 1
+
+    # Second timeout hits the limit -> blocked (the orchestrator labels needs-human).
+    res2 = worker.run_task(ws, cfg, repo, 1, store.load()[0], tmp_path, token=None)
+    assert res2.status == BLOCKED
+    assert store.load()[0].status == BLOCKED
+    assert store.load()[0].attempts == 2
 
 
 def test_worker_branch_name() -> None:

@@ -117,6 +117,9 @@ class Config:
     # tick bounded/predictable; remaining tasks resume on the next tick since
     # task state is persisted.
     max_tasks_per_tick: int = 0
+    # How many times a worker task may run before a timeout escalates it to
+    # needs-human. A timed-out task is reset to pending and retried until this.
+    max_task_attempts: int = 2
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Config:
@@ -133,6 +136,7 @@ class Config:
             agent_timeout=float(data.get("agent_timeout", DEFAULT_AGENT_TIMEOUT)),
             max_issues_per_tick=int(data.get("max_issues_per_tick", 0)),
             max_tasks_per_tick=int(data.get("max_tasks_per_tick", 0)),
+            max_task_attempts=int(data.get("max_task_attempts", 2)),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -149,6 +153,7 @@ class Config:
             "agent_timeout": self.agent_timeout,
             "max_issues_per_tick": self.max_issues_per_tick,
             "max_tasks_per_tick": self.max_tasks_per_tick,
+            "max_task_attempts": self.max_task_attempts,
         }
 
     def model_for(self, role: str) -> str:
