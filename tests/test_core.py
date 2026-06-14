@@ -6,8 +6,8 @@ import os
 import random
 from collections.abc import Callable
 from pathlib import Path
-from unittest.mock import patch
 from typing import cast
+from unittest.mock import patch
 
 import httpx
 import pytest
@@ -1767,10 +1767,10 @@ def test_run_build_blast_radius_prevents_reviewer(
 
     # needs-human label was added.
     add_labels_calls = [c for c in gh.calls if c[0] == "add_labels"]
-    needs_human_added = any(
-        config.labels["needs_human"] in cast("list[str]", c[1][-1]) for c in add_labels_calls
-    )
+    needs_human_added = any(config.labels["needs_human"] in cast("list[str]", c[1][-1]) for c in add_labels_calls)
     assert needs_human_added, "needs-human label should have been added"
+
+
 # --- conventions ------------------------------------------------------------
 def test_read_conventions_no_file(tmp_path: Path) -> None:
     assert read_conventions(tmp_path) == ""
