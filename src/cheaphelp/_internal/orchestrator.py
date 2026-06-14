@@ -85,6 +85,9 @@ def classify(issue: Issue, comments: list, config: Config) -> str:
     if lab["in_review"] in labels:
         return "rework"
     if lab["needs_human"] in labels:
+        # If the human replied since the bot asked, route back to the responder.
+        if comments and not responder.is_bot_comment(comments[-1]):
+            return "responder"
         return "needs-human"
     if lab["planned"] in labels or lab["in_progress"] in labels:
         return "build"  # worker or reviewer, decided by task state
