@@ -285,12 +285,48 @@ def cmd_repo_set(args: argparse.Namespace) -> int:
 
 # --- run -------------------------------------------------------------------
 def cmd_run(args: argparse.Namespace) -> int:
+    """Run the orchestrator for one or more ticks.
+
+    Reads ``--num-ticks`` / ``-n`` (default 1), ``--continuous``,
+    ``--max-ticks`` (default 20), and ``--sleep`` (default 30.0) from *args*.
+
+    * Single-tick mode (default): behaves exactly like the original one-shot run.
+    * Multi-tick mode (``-n N`` with N > 1): runs N ticks, sleeping ``--sleep``
+      seconds between each.
+    * Continuous mode (``--continuous``): runs until a tick produces zero agent
+      turns, capped at ``--max-ticks``.
+
+    A ``KeyboardInterrupt`` stops the loop gracefully and returns 130.
+    """
     ws = _workspace(args)
     if (rc := _require_workspace(ws)) is not None:
         return rc
 
+    # Read new-style flags defensively (same pattern as existing code).
+    continuous = bool(getattr(args, "continuous", False))
+    num_ticks = int(getattr(args, "num_ticks", 1) or 1)
+    max_ticks = int(getattr(args, "max_ticks", 20) or 20)
+    sleep_seconds = float(getattr(args, "sleep", 30.0) or 0.0)
+
+    # --- validation ---------------------------------------------------------
+    if continuous and num_ticks != 1:
+        print("--continuous cannot be combined with --num-ticks", file=sys.stderr)
+        return 2
+    if num_ticks < 1:
+        print("--num-ticks must be >= 1", file=sys.stderr)
+        return 2
+    if max_ticks < 1:
+        print("--max-ticks must be >= 1", file=sys.stderr)
+        return 2
+    if sleep_seconds < 0:
+        print("--sleep must be >= 0", file=sys.stderr)
+        return 2
+
+    cap = max_ticks if continuous else num_ticks
+    total_turns = 0
+    total_ticks = 0
+
     log_path = ws.logs_dir / f"run-{datetime.datetime.now(datetime.timezone.utc).date().isoformat()}.log"
-    header = f"[{datetime.datetime.now(datetime.timezone.utc):%Y-%m-%d %H:%M:%S}] --- tick start ---"
 
     def log(msg: str) -> None:
         print(msg)
@@ -300,19 +336,47 @@ def cmd_run(args: argparse.Namespace) -> int:
         except OSError:
             pass  # don't crash the tick for a log write failure
 
-    log(header)
     config = ws.load_config()
     cli_max = getattr(args, "max_issues", 0) or 0
     effective_max = cli_max if cli_max > 0 else config.max_issues_per_tick
-    report = tick(ws, dry_run=args.dry_run, log=log, max_issues=effective_max)
-    if report.error:
-        print(f"\nError: {report.error}", file=sys.stderr)
-        return 1
-    if getattr(report, "skipped", False):
-        return 0  # skip message already logged via the tick's `log` callback
-    print(f"\nDone. {report.total_turns} agent turn(s) across {len(report.repos)} repo(s).")
-    for cost_line in _format_cost_lines(report):
-        log(cost_line)
+
+    try:
+        for i in range(1, cap + 1):
+            now = datetime.datetime.now(datetime.timezone.utc)
+            if cap == 1:
+                # Preserve the exact single-tick header for backward compat.
+                log(f"[{now:%Y-%m-%d %H:%M:%S}] --- tick start ---")
+            else:
+                log(f"[{now:%Y-%m-%d %H:%M:%S}] [tick {i}/{cap}] --- tick {i} start ---")
+
+            report = tick(ws, dry_run=args.dry_run, log=log, max_issues=effective_max)
+            total_ticks += 1
+            total_turns += report.total_turns
+
+            if report.error:
+                print(f"\nError: {report.error}", file=sys.stderr)
+                return 1
+
+            if getattr(report, "skipped", False):
+                return 0  # skip message already logged via the tick's `log` callback
+
+            for cost_line in _format_cost_lines(report):
+                log(cost_line)
+
+            if continuous and report.total_turns == 0:
+                break
+
+            if i < cap:
+                time.sleep(sleep_seconds)
+
+    except KeyboardInterrupt:
+        print("\nInterrupted. Stopping.", file=sys.stderr)
+        return 130
+
+    if cap == 1:
+        print(f"\nDone. {total_turns} agent turn(s) across {len(report.repos)} repo(s).")
+    else:
+        print(f"\nDone. {total_ticks} tick(s), {total_turns} total agent turn(s).")
     return 0
 
 
