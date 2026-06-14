@@ -3,7 +3,7 @@ _commit: 1.12.1
 _src_path: gh:pawamoy/copier-uv
 author_email: jacobataylor7@gmail.com
 author_fullname: Jacob Taylor
-author_username: jacobataylor7
+author_username: jacotay7
 copyright_date: '2026'
 copyright_holder: Jacob Taylor
 copyright_holder_email: jacobataylor7@gmail.com
@@ -16,6 +16,6 @@ python_package_command_line_name: cheaphelp
 python_package_distribution_name: cheaphelp
 python_package_import_name: cheaphelp
 repository_name: cheaphelp
-repository_namespace: jacobataylor7
+repository_namespace: jacotay7
 repository_provider: github.com
 

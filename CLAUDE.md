@@ -72,8 +72,9 @@ All product code is under `src/cheaphelp/_internal/`:
 | `systemd.py` | user service + timer install |
 | `commands.py` / `cli.py` | argparse CLI (`cmd_*` per subcommand) |
 
-Tests in `tests/` (`test_cli.py`, `test_api.py`, `test_core.py`); shared
-fixtures in `tests/conftest.py`.
+Tests live in `tests/`, one file per `src/cheaphelp/_internal/` module (plus
+`test_cli_*.py` per CLI subcommand and `test_api.py`); shared fixtures in
+`tests/conftest.py`.
 
 ## Key conventions & invariants
 
@@ -98,6 +99,12 @@ fixtures in `tests/conftest.py`.
 - **Network isolation in tests**: never make real network/API calls; mock the
   GitHub client and the agent layer. Set `CHEAPHELP_AGENT_MOCK=/path/to/decision.json`
   to make `run_agent` return canned output instead of invoking opencode.
+- **Fake GitHub clients**: use `tests.conftest.FakeGitHubClient` (a real
+  `GitHubClient` subclass) instead of writing a new ad-hoc duck-typed class —
+  ad-hoc fakes don't satisfy `ty`'s `GitHubClient` parameter types and need
+  `# ty: ignore[invalid-argument-type]` on every call. Seed `.issues`,
+  `.comments`, `.labels`, etc. and build payloads with `make_issue`/
+  `make_comment`/`make_pr_state`, also in `tests/conftest.py`.
 - **Per-issue failures must not abort a tick** — `_process_repo` guards each
   stage; preserve that resilience.
 

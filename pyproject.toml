@@ -33,14 +33,14 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://jacobataylor7.github.io/cheaphelp"
-Documentation = "https://jacobataylor7.github.io/cheaphelp"
-Changelog = "https://jacobataylor7.github.io/cheaphelp/changelog"
-Repository = "https://github.com/jacobataylor7/cheaphelp"
-Issues = "https://github.com/jacobataylor7/cheaphelp/issues"
-Discussions = "https://github.com/jacobataylor7/cheaphelp/discussions"
+Homepage = "https://jacotay7.github.io/cheaphelp"
+Documentation = "https://jacotay7.github.io/cheaphelp"
+Changelog = "https://jacotay7.github.io/cheaphelp/changelog"
+Repository = "https://github.com/jacotay7/cheaphelp"
+Issues = "https://github.com/jacotay7/cheaphelp/issues"
+Discussions = "https://github.com/jacotay7/cheaphelp/discussions"
 Gitter = "https://gitter.im/cheaphelp/community"
-Funding = "https://github.com/sponsors/jacobataylor7"
+Funding = "https://github.com/sponsors/jacotay7"
 
 [project.scripts]
 cheaphelp = "cheaphelp:main"

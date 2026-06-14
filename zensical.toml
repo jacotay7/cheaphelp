@@ -2,9 +2,9 @@
 site_name = "cheaphelp"
 site_description = "An AI software-engineer that triages GitHub issues, plans, implements, and reviews changes on your repos using cheap OpenRouter models via the opencode harness."
 site_author = "Jacob Taylor"
-site_url = "https://jacobataylor7.github.io/cheaphelp"
-repo_url = "https://github.com/jacobataylor7/cheaphelp"
-repo_name = "jacobataylor7/cheaphelp"
+site_url = "https://jacotay7.github.io/cheaphelp"
+repo_url = "https://github.com/jacotay7/cheaphelp"
+repo_name = "jacotay7/cheaphelp"
 edit_uri = "edit/main/docs/"
 copyright = "Copyright &copy; 2026 Jacob Taylor"
 extra_css = ["css/apidocs.css"]
@@ -78,7 +78,7 @@ toggle.name = "Switch to system preference"
 # ----------------------------------------------------------------------------
 [[project.extra.social]]
 icon = "fontawesome/brands/github"
-link = "https://github.com/jacobataylor7"
+link = "https://github.com/jacotay7"
 
 [[project.extra.social]]
 icon = "fontawesome/brands/twitter"
