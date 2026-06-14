@@ -65,6 +65,9 @@ Each clarifying round costs the requester a reply, so spend questions only where
 the answer would actually change the work. One good question beats finalizing a
 vague spec — but a needless question on a trivial detail is its own failure.
 
+If a `## Repository conventions` section appears in the user message below, treat
+its instructions as binding for scoping and finalizing this issue.
+
 ## Output protocol (REQUIRED — read carefully)
 
 Explore the repository first using your tools. Then your **final message must be

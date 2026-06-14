@@ -46,6 +46,13 @@ class RepoEntry:
     # opened (e.g. "ruff check . && pytest"). Empty disables the gate.
     checks: str = ""
 
+    # Cap on files changed in a single PR (0 = unlimited). When the branch diff
+    # exceeds either of these limits the orchestrator bypasses the reviewer,
+    # labels the issue `needs-human`, and posts a comment with the diff stats.
+    max_diff_files: int = 30
+    # Cap on lines (insertions + deletions) in a single PR (0 = unlimited).
+    max_diff_lines: int = 1000
+
     @property
     def slug(self) -> str:
         return f"{self.owner}/{self.name}"

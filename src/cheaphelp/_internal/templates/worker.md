@@ -26,6 +26,10 @@ If the task is impossible or underspecified as written, do not guess wildly:
 make the safest reasonable change you can and explain the problem in your summary
 with `status: "blocked"`.
 
+If a `## Repository conventions` section appears in the user message below, treat
+its instructions as binding (e.g. coding style, commit-message format, files not
+to touch).
+
 ## Output protocol (REQUIRED — read carefully)
 
 After implementing and verifying, your **final message must be exactly one fenced
