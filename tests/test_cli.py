@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from cheaphelp import main
-from cheaphelp._internal import commands, debug
+from cheaphelp._internal import commands, debug, orchestrator
 from cheaphelp._internal.config import Config, Workspace
 from cheaphelp._internal.env import GITHUB_TOKEN_KEY, update_env_file
 from cheaphelp._internal.github import Comment, Issue
@@ -916,29 +916,44 @@ def test_status_no_workspace_exits_1(
     assert "No workspace" in err
 
 
-# --- run-lock skip behaviour -----------------------------------------------
-def test_cmd_run_skips_when_lock_held(
+# --- per-issue lock skip behaviour -----------------------------------------
+def test_cmd_run_skips_locked_issue_but_completes_tick(
     tmp_path: Path,
     capsys: pytest.CaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """When another process holds the run lock, `cheaphelp run` logs a skip message.
+    """A locked issue is skipped (logged) while the tick still runs to completion.
 
-    The second invocation must exit 0 without doing any work, with the skip
-    notice mirrored to stdout (and the daily log file).
+    Ticks no longer take a single global lock; instead each issue has its own
+    lock so an overlapping tick can work on other issues. Holding one issue's
+    lock makes `run` report it as in progress elsewhere, but the tick proceeds.
     """
-    ws = _setup_workspace(tmp_path)  # existing helper: ensure + save_config
-    with RunLock(ws.run_lock_path) as holder:
+    ws = _setup_workspace(tmp_path)
+    _seed_workspace_env(ws, token=_TEST_TOKEN)
+    Registry(ws.registry_path).add(RepoEntry(owner="octocat", name="hello", enabled=True))
+    # Mock mode: _is_mock() True so the tick never clones or calls an agent.
+    monkeypatch.setenv("CHEAPHELP_AGENT_MOCK", "/dev/null")
+
+    fake = _FakeGH("test-token")
+    fake.issues["octocat/hello"] = [
+        Issue(number=7, title="t", body="", state="open", labels=[], user="alice", html_url=""),
+    ]
+
+    def _factory(token: str, **_kwargs: object) -> _FakeGH:
+        fake.token = token
+        return fake
+
+    monkeypatch.setattr(orchestrator, "GitHubClient", _factory)
+
+    with RunLock(ws.issue_lock_path("octocat", "hello", 7)) as holder:
         assert holder.acquired
         rc = main(["--home", str(ws.home), "run"])
     assert rc == 0
-    captured = capsys.readouterr()
-    combined = captured.out + captured.err
-    # The skip message is routed through cmd_run's `log` callback (which
-    # mirrors to stdout) AND the daily log file.
-    assert "already running" in combined.lower()
-    assert "skipping" in combined.lower()
-    # The lock is the very first thing tick() does, so it should not have
-    # called out to GitHub — no "acting as @" line should appear.
-    assert "acting as" not in combined
-    # The "Done." summary is suppressed for a skipped tick.
-    assert "Done." not in combined
+
+    combined = (capsys.readouterr().out).lower()
+    # The tick ran (it authenticated) and finished with a summary...
+    assert "acting as" in combined
+    assert "done." in combined
+    # ...but issue #7 was skipped because its lock was held.
+    assert "#7" in combined
+    assert "skipping" in combined
