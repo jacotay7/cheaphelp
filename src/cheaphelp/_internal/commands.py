@@ -429,7 +429,6 @@ def cmd_status(args: argparse.Namespace) -> int:
     show_costs = getattr(args, "costs", False)
     try:
         with GitHubClient(token) as gh:
-            bot_login = gh.authenticated_login()
             for repo in repos:
                 print(repo.slug)
                 try:
@@ -446,7 +445,7 @@ def cmd_status(args: argparse.Namespace) -> int:
                     except GitHubError as exc:
                         print(f"  ! failed to list comments for #{issue.number}: {exc}", file=sys.stderr)
                         comments = []
-                    stage = classify(issue, comments, bot_login, config)
+                    stage = classify(issue, comments, config)
                     label = stage
                     title = issue.title[: title_width - 1] + "\u2026" if len(issue.title) > title_width else issue.title
                     if show_costs:

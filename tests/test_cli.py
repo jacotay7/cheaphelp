@@ -19,6 +19,7 @@ from cheaphelp._internal.env import GITHUB_TOKEN_KEY, update_env_file
 from cheaphelp._internal.github import Comment, Issue
 from cheaphelp._internal.lock import RunLock
 from cheaphelp._internal.registry import Registry, RepoEntry
+from cheaphelp._internal.responder import BOT_MARKER
 
 
 def test_main() -> None:
@@ -815,7 +816,7 @@ def test_status_idle_stage_renders_idle(
     ]
     # Bot authored the last comment, so the responder is not waiting on anything.
     fake.comments[("octocat/hello", 1)] = [
-        Comment(id=1, body="hi", user=fake.login, created_at=""),
+        Comment(id=1, body=f"{BOT_MARKER}\nhi", user=fake.login, created_at=""),
     ]
 
     def _factory(token: str, **_kwargs: object) -> _FakeGH:

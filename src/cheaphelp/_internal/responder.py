@@ -56,12 +56,12 @@ def cheaphelp_message(body: str, role: str, config: Config) -> str:
     return with_attribution(body, role=role, model=model)
 
 
-def is_bot_comment(comment: Comment, bot_login: str) -> bool:
+def is_bot_comment(comment: Comment) -> bool:
     """Whether a comment was authored by the responder."""
-    return BOT_MARKER in comment.body or (bool(bot_login) and comment.user == bot_login)
+    return BOT_MARKER in comment.body
 
 
-def needs_turn(issue: Issue, comments: list[Comment], bot_login: str, config: Config) -> bool:
+def needs_turn(issue: Issue, comments: list[Comment], config: Config) -> bool:
     """Decide whether an issue is waiting on a responder turn.
 
     True when the issue is open, not already finalized/rejected, and the most
@@ -76,10 +76,10 @@ def needs_turn(issue: Issue, comments: list[Comment], bot_login: str, config: Co
         return True
     last = comments[-1]
     # If we spoke last, we are waiting on the human.
-    return not is_bot_comment(last, bot_login)
+    return not is_bot_comment(last)
 
 
-def build_prompt(issue: Issue, comments: list[Comment], bot_login: str, *, conventions: str = "") -> str:
+def build_prompt(issue: Issue, comments: list[Comment], *, conventions: str = "") -> str:
     """Render the conversation into the user message handed to the agent."""
     lines = [
         f"# Issue #{issue.number}: {issue.title}",
@@ -97,7 +97,7 @@ def build_prompt(issue: Issue, comments: list[Comment], bot_login: str, *, conve
         lines.append("_(no comments yet)_")
     else:
         for comment in comments:
-            who = "responder (you)" if is_bot_comment(comment, bot_login) else f"@{comment.user}"
+            who = "responder (you)" if is_bot_comment(comment) else f"@{comment.user}"
             # Strip the hidden marker and the harness-added attribution header line;
             # who-said-what is already labelled, so they would just be noise here.
             stripped = comment.body.replace(BOT_MARKER, "")

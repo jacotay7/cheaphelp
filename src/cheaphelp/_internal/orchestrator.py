@@ -68,7 +68,7 @@ def _unmet_dependencies(
     return [n for n in deps if n != issue.number and n in open_numbers]
 
 
-def classify(issue: Issue, comments: list, bot_login: str, config: Config) -> str:
+def classify(issue: Issue, comments: list, config: Config) -> str:
     """Return the pipeline stage for an issue.
 
     Always returns a string; actionable stages are ``"responder"``, ``"planner"``,
@@ -90,7 +90,7 @@ def classify(issue: Issue, comments: list, bot_login: str, config: Config) -> st
         return "build"  # worker or reviewer, decided by task state
     if labels & {lab["ready"], lab["needs_replan"]}:
         return "planner"
-    if responder.needs_turn(issue, comments, bot_login, config):
+    if responder.needs_turn(issue, comments, config):
         return "responder"
     return "idle"
 
@@ -156,8 +156,8 @@ def _record_cost(
     by_issue.setdefault(role, []).append(usage)
 
 
-def _run_responder(gh, workspace, config, repo, issue, comments, bot_login, cwd, log, report) -> None:  # noqa: ANN001
-    prompt = responder.build_prompt(issue, comments, bot_login, conventions=read_conventions(cwd))
+def _run_responder(gh, workspace, config, repo, issue, comments, cwd, log, report) -> None:  # noqa: ANN001
+    prompt = responder.build_prompt(issue, comments, conventions=read_conventions(cwd))
     log(f"  · {repo.slug}#{issue.number}: running responder ({config.model_for('responder')})…")
     result = opencode.run_agent(workspace, config, "responder", prompt, cwd=cwd, timeout=config.agent_timeout)
     _record_cost(workspace, repo, issue.number, "responder", result.usage, report)
@@ -425,7 +425,6 @@ def _process_repo(
     workspace: Workspace,
     config: Config,
     repo: RepoEntry,
-    bot_login: str,
     token: str,
     *,
     dry_run: bool,
@@ -451,7 +450,7 @@ def _process_repo(
     work: list[tuple[str, Issue, list]] = []
     for issue in issues:
         comments = gh.list_issue_comments(repo.owner, repo.name, issue.number)
-        stage = classify(issue, comments, bot_login, config)
+        stage = classify(issue, comments, config)
         if stage not in _ACTIONABLE_STAGES:
             continue
         # Hold the planner/build stages until depended-on issues are closed.
@@ -514,7 +513,7 @@ def _process_repo(
                 log(f"  ! {repo.slug}#{issue.number}: could not refresh state: {_short_exc(exc)}")
                 report.actions.append(f"#{issue.number}: refresh failed")
                 continue
-            current = classify(fresh_issue, fresh_comments, bot_login, config)
+            current = classify(fresh_issue, fresh_comments, config)
             if current != stage:
                 log(f"  · {repo.slug}#{issue.number}: now '{current}' (was '{stage}'); already handled, skipping")
                 report.issues_skipped += 1
@@ -529,7 +528,6 @@ def _process_repo(
                         repo,
                         fresh_issue,
                         fresh_comments,
-                        bot_login,
                         cwd,
                         log,
                         report,
@@ -596,7 +594,6 @@ def tick(
                         workspace,
                         config,
                         repo,
-                        report.bot_login,
                         token,
                         dry_run=dry_run,
                         log=log,

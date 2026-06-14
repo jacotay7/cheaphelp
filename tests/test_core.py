@@ -447,7 +447,6 @@ def test_process_repo_caps_work_to_max_issues(
         ws,
         Config(),
         repo,
-        "mybot",
         "token",
         dry_run=True,
         log=lambda _m: None,
@@ -462,7 +461,6 @@ def test_process_repo_caps_work_to_max_issues(
         ws,
         Config(),
         repo,
-        "mybot",
         "token",
         dry_run=True,
         log=lambda _m: None,
@@ -475,7 +473,6 @@ def test_process_repo_caps_work_to_max_issues(
         ws,
         Config(),
         repo,
-        "mybot",
         "token",
         dry_run=True,
         log=lambda _m: None,
@@ -503,7 +500,6 @@ def test_process_repo_skips_locked_issue(
             ws,
             Config(),
             repo,
-            "mybot",
             "token",
             dry_run=False,
             log=lambda _m: None,
@@ -668,7 +664,6 @@ def test_process_repo_defers_issue_with_open_dependency(
         ws,
         Config(),
         repo,
-        "mybot",
         "token",
         dry_run=False,
         log=lambda _m: None,
@@ -682,7 +677,6 @@ def test_process_repo_defers_issue_with_open_dependency(
         ws,
         Config(),
         repo,
-        "mybot",
         "token",
         dry_run=True,  # dry-run: just confirm it is now considered work
         log=lambda _m: None,
@@ -877,17 +871,41 @@ def _comment(body: str, user: str) -> Comment:
 def test_needs_turn_logic() -> None:
     cfg = Config()
     bot = "mybot"
-    assert needs_turn(_issue(), [], bot, cfg) is True  # fresh issue
+    assert needs_turn(_issue(), [], cfg) is True  # fresh issue
     bot_c = _comment(BOT_MARKER + "\nQ?", bot)
-    assert needs_turn(_issue(), [bot_c], bot, cfg) is False  # waiting on human
+    assert needs_turn(_issue(), [bot_c], cfg) is False  # waiting on human
     human_c = _comment("answer", "alice")
-    assert needs_turn(_issue(), [bot_c, human_c], bot, cfg) is True  # human replied
+    assert needs_turn(_issue(), [bot_c, human_c], cfg) is True  # human replied
     ready = _issue(labels=[cfg.labels["ready"]])
-    assert needs_turn(ready, [human_c], bot, cfg) is False  # already finalized
+    assert needs_turn(ready, [human_c], cfg) is False  # already finalized
+    # Single-account scenario: a reply from the bot's own account but without the
+    # marker must be treated as a human reply (not a bot comment).
+    same_account_reply = _comment("got it", bot)
+    assert needs_turn(_issue(), [bot_c, same_account_reply], cfg) is True
+
+
+def test_is_bot_comment_single_account() -> None:
+    """Verify is_bot_comment relies solely on the BOT_MARKER, not the author login.
+
+    The bug: when the bot account is the same as the issue author, a plain human
+    reply was misidentified as a bot comment because the old is_bot_comment did
+    a ``comment.user == bot_login`` check as a fallback.
+
+    Under the fix: only the presence of BOT_MARKER matters.
+    """
+    bot = "mybot"
+    # Same user as bot, body has no marker → NOT a bot comment (the bug fix).
+    assert is_bot_comment(_comment("plain reply", bot)) is False
+    # Same user AND marker present → still a bot comment.
+    assert is_bot_comment(_comment(f"{BOT_MARKER}\nhi", bot)) is True
+    # Different user, marker present → still a bot comment (marker alone is enough).
+    assert is_bot_comment(_comment(f"{BOT_MARKER}\nhi", "alice")) is True
+    # Control: neither user nor marker matches.
+    assert is_bot_comment(_comment("alice said hi", "alice")) is False
 
 
 def test_build_prompt_includes_thread() -> None:
-    prompt = build_prompt(_issue(number=42), [_comment("hi", "alice")], "mybot")
+    prompt = build_prompt(_issue(number=42), [_comment("hi", "alice")])
     assert "Issue #42" in prompt
     assert "@alice" in prompt
     assert "hi" in prompt
@@ -913,13 +931,13 @@ def test_cheaphelp_message_prefixes_header_marker_and_is_detected() -> None:
     assert BOT_MARKER in body
     assert "hello world" in body
     # The hidden marker keeps the comment recognisable as cheaphelp's own.
-    assert is_bot_comment(_comment(body, "someone-else"), "mybot") is True
+    assert is_bot_comment(_comment(body, "someone-else")) is True
 
 
 def test_build_prompt_strips_attribution_header_from_thread() -> None:
     cfg = Config()
     own = cheaphelp_message("an earlier question", "responder", cfg)
-    prompt = build_prompt(_issue(number=7), [_comment(own, "mybot")], "mybot")
+    prompt = build_prompt(_issue(number=7), [_comment(own, "mybot")])
     # The visible header and hidden marker are not shown back to the responder.
     assert ATTRIBUTION_PREFIX not in prompt
     assert BOT_MARKER not in prompt
@@ -984,7 +1002,7 @@ def test_reviewer_build_prompt_no_conventions_by_default() -> None:
 
 
 def test_build_prompt_conventions_whitespace_only() -> None:
-    prompt = build_prompt(_issue(), [], "bot", conventions="   ")
+    prompt = build_prompt(_issue(), [], conventions="   ")
     assert "## Repository conventions" not in prompt
 
 
@@ -1716,23 +1734,23 @@ def test_classify_stages() -> None:
     lab = cfg.labels
     bot = "bot"
     # Fresh issue, human opened it -> responder.
-    assert classify(_issue_with([]), [], bot, cfg) == "responder"
+    assert classify(_issue_with([]), [], cfg) == "responder"
     # Ready / needs-replan -> planner.
-    assert classify(_issue_with([lab["ready"]]), [], bot, cfg) == "planner"
-    assert classify(_issue_with([lab["needs_replan"]]), [], bot, cfg) == "planner"
+    assert classify(_issue_with([lab["ready"]]), [], cfg) == "planner"
+    assert classify(_issue_with([lab["needs_replan"]]), [], cfg) == "planner"
     # Planned -> build.
-    assert classify(_issue_with([lab["planned"]]), [], bot, cfg) == "build"
+    assert classify(_issue_with([lab["planned"]]), [], cfg) == "build"
     # In-progress alone (defensive) -> build.
-    assert classify(_issue_with([lab["in_progress"]]), [], bot, cfg) == "build"
+    assert classify(_issue_with([lab["in_progress"]]), [], cfg) == "build"
     # Terminal / waiting -> named stage.
-    assert classify(_issue_with([lab["rejected"]]), [], bot, cfg) == "rejected"
-    assert classify(_issue_with([lab["in_review"]]), [], bot, cfg) == "rework"
-    assert classify(_issue_with([lab["needs_human"]]), [], bot, cfg) == "needs-human"
+    assert classify(_issue_with([lab["rejected"]]), [], cfg) == "rejected"
+    assert classify(_issue_with([lab["in_review"]]), [], cfg) == "rework"
+    assert classify(_issue_with([lab["needs_human"]]), [], cfg) == "needs-human"
     # Idle: no label and the last comment is from the bot (no responder turn needed).
-    bot_c = Comment(id=1, body="hi", user=bot, created_at="")
-    assert classify(_issue_with([]), [bot_c], bot, cfg) == "idle"
+    bot_c = Comment(id=1, body=f"{BOT_MARKER}\nhi", user=bot, created_at="")
+    assert classify(_issue_with([]), [bot_c], cfg) == "idle"
     # Terminal labels win over in-progress (precedence: rejected > in-review > needs-human).
-    assert classify(_issue_with([lab["in_progress"], lab["in_review"]]), [], bot, cfg) == "rework"
+    assert classify(_issue_with([lab["in_progress"], lab["in_review"]]), [], cfg) == "rework"
 
 
 # --- workspace lock --------------------------------------------------------
@@ -3340,4 +3358,4 @@ def test_process_repo_rework_stage_no_feedback(
 def test_classify_in_review_returns_rework() -> None:
     """An issue with only the in_review label always classifies to rework."""
     cfg = Config()
-    assert classify(_issue_with([cfg.labels["in_review"]]), [], "bot", cfg) == "rework"
+    assert classify(_issue_with([cfg.labels["in_review"]]), [], cfg) == "rework"
