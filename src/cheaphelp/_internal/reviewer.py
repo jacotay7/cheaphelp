@@ -11,7 +11,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from cheaphelp._internal import gitutil, opencode
+from cheaphelp._internal import gitutil, opencode, pr_state
 from cheaphelp._internal.config import Config, Workspace
 from cheaphelp._internal.github import GitHubClient
 from cheaphelp._internal.registry import RepoEntry
@@ -76,6 +76,24 @@ class ReviewResult:
     error: str | None = None
 
 
+def _save_pr_state(issue_dir: Path, pr: dict, reviewers: list[str], clone_dir: Path) -> None:
+    """Write ``pr_state.json`` so the rework stage can find the PR on later ticks."""
+    try:
+        last_push_sha = gitutil.rev_parse(clone_dir)
+    except gitutil.GitError:
+        last_push_sha = ""
+    pr_state.save_pr_state(
+        issue_dir,
+        {
+            "pr_number": int(pr.get("number", 0)),
+            "pr_url": str(pr.get("html_url", "")),
+            "last_push_sha": last_push_sha,
+            "reviewers": reviewers,
+            "rework_attempts": 0,
+        },
+    )
+
+
 def apply_review(
     gh: GitHubClient,
     workspace: Workspace,
@@ -125,6 +143,8 @@ def apply_review(
         # author (common when the bot is the repo owner); the @mention above
         # still notifies them in that case.
         gh.request_reviewers(repo.owner, repo.name, int(pr.get("number", 0)), reviewers)
+        # Persist the PR link so the rework stage can find it on later ticks.
+        _save_pr_state(issue_dir, pr, reviewers, clone_dir)
         gh.ensure_label(
             repo.owner,
             repo.name,

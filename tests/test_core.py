@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from cheaphelp._internal import cleanup, gitutil, opencode, orchestrator, planner, systemd, worker
+from cheaphelp._internal import cleanup, gitutil, opencode, orchestrator, planner, pr_state, systemd, worker
 from cheaphelp._internal.config import DEFAULT_AGENT_TIMEOUT, DEFAULT_MODELS, Config, Workspace
 from cheaphelp._internal.env import parse_env, read_env_file, update_env_file
 from cheaphelp._internal.github import Comment, GitHubClient, Issue, PRReviewComment
@@ -1170,3 +1170,55 @@ def test_pr_review_comment_from_payload_line_none() -> None:
     comment = PRReviewComment.from_payload(data)
     assert comment.line is None
     assert comment.path == "file.py"
+
+
+# --- pr_state ---------------------------------------------------------------
+def test_pr_state_save_then_load(tmp_path: Path) -> None:
+    data = {
+        "pr_number": 42,
+        "pr_url": "https://github.com/o/r/pull/42",
+        "last_push_sha": "abc",
+        "reviewers": ["alice"],
+        "rework_attempts": 0,
+    }
+    issue_dir = tmp_path / "issue-1"
+    pr_state.save_pr_state(issue_dir, data)
+    loaded = pr_state.load_pr_state(issue_dir)
+    assert loaded is not None
+    # updated_at is auto-added; compare everything else.
+    for k, v in data.items():
+        assert loaded[k] == v
+    assert "updated_at" in loaded
+
+
+def test_pr_state_load_missing(tmp_path: Path) -> None:
+    assert pr_state.load_pr_state(tmp_path / "nonexistent") is None
+
+
+def test_pr_state_load_corrupt(tmp_path: Path) -> None:
+    path = tmp_path / "issue-2" / "pr_state.json"
+    path.parent.mkdir(parents=True)
+    path.write_text("{not json", encoding="utf-8")
+    assert pr_state.load_pr_state(tmp_path / "issue-2") is None
+
+
+def test_pr_state_creates_parent_dir(tmp_path: Path) -> None:
+    issue_dir = tmp_path / "a" / "b" / "issue-3"
+    assert not issue_dir.exists()
+    pr_state.save_pr_state(issue_dir, {"pr_number": 1})
+    loaded = pr_state.load_pr_state(issue_dir)
+    assert loaded is not None
+    assert loaded["pr_number"] == 1
+
+
+def test_rev_parse_returns_sha(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir(parents=True)
+    gitutil._run(["init"], cwd=repo)
+    gitutil._run(["config", "user.email", "test@test"], cwd=repo)
+    gitutil._run(["config", "user.name", "Test"], cwd=repo)
+    gitutil._run(["commit", "--allow-empty", "-m", "first"], cwd=repo)
+    sha = gitutil.rev_parse(repo)
+    assert isinstance(sha, str)
+    assert len(sha) == 40
+    assert all(c in "0123456789abcdef" for c in sha)

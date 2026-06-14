@@ -136,6 +136,14 @@ def run_command(clone_dir: Path, command: str, *, timeout: float = 900.0) -> tup
     return proc.returncode, (proc.stdout + proc.stderr)
 
 
+def rev_parse(cwd: Path, ref: str = "HEAD") -> str:
+    """Return the SHA of *ref* (default ``HEAD``) as a trimmed hex string.
+
+    Raises :class:`GitError` if the ref does not exist or the git command fails.
+    """
+    return _run(["rev-parse", ref], cwd=cwd)
+
+
 def diff_against_base(clone_dir: Path, repo: RepoEntry) -> tuple[str, str]:
     """Return (name-status, full unified diff) of the branch vs the base branch."""
     base = repo.default_branch or "main"
