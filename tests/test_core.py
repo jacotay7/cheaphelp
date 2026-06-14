@@ -2558,11 +2558,29 @@ def test_tick_report_total_cost_sums_across_repos(
     ws.ensure()
     ws.save_config(Config())
     monkeypatch.setenv("CHEAPHELP_AGENT_MOCK", "/dev/null")
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
 
     # Register two repos.
     reg = Registry(ws.registry_path)
     reg.add(RepoEntry(owner="octocat", name="hello", enabled=True))
     reg.add(RepoEntry(owner="octocat", name="world", enabled=True))
+
+    # Mock the GitHub client so the tick never touches the network: both repos
+    # report zero open issues, so each yields a RepoReport with cost=UsageData().
+    class _NoIssuesGH:
+        def __enter__(self) -> _NoIssuesGH:
+            return self
+
+        def __exit__(self, *_exc: object) -> bool:
+            return False
+
+        def authenticated_login(self) -> str:
+            return "mybot"
+
+        def list_open_issues(self, _owner: str, _name: str) -> list[Issue]:
+            return []
+
+    monkeypatch.setattr(orchestrator, "GitHubClient", lambda *_a, **_k: _NoIssuesGH())
 
     report = orchestrator.tick(ws, log=lambda _m: None)
 
