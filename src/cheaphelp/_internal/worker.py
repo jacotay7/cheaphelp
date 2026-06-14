@@ -14,6 +14,7 @@ from pathlib import Path
 
 from cheaphelp._internal import gitutil, opencode
 from cheaphelp._internal.config import Config, Workspace
+from cheaphelp._internal.conventions import read_conventions
 from cheaphelp._internal.registry import RepoEntry
 from cheaphelp._internal.tasks import BLOCKED, DONE, PENDING, Task, TaskStore
 
@@ -88,7 +89,8 @@ def run_task(
     issue_md = issue_md_path.read_text(encoding="utf-8") if issue_md_path.exists() else ""
 
     store.set_status(task.id, "in_progress")
-    prompt = build_prompt(task, issue_md)
+    conventions = read_conventions(clone_dir)
+    prompt = build_prompt(task, issue_md, conventions=conventions)
     try:
         result = opencode.run_agent(workspace, config, "worker", prompt, cwd=clone_dir, timeout=config.agent_timeout)
     except subprocess.TimeoutExpired:

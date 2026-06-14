@@ -13,6 +13,7 @@ from pathlib import Path
 
 from cheaphelp._internal import gitutil, opencode
 from cheaphelp._internal.config import Config, Workspace
+from cheaphelp._internal.conventions import read_conventions
 from cheaphelp._internal.github import GitHubClient
 from cheaphelp._internal.registry import RepoEntry
 from cheaphelp._internal.responder import cheaphelp_message
@@ -189,7 +190,8 @@ def review_issue(
     issue_md_path = issue_dir / "issues.md"
     issue_md = issue_md_path.read_text(encoding="utf-8") if issue_md_path.exists() else ""
     name_status, full_diff = gitutil.diff_against_base(clone_dir, repo)
-    prompt = build_prompt(issue_md, name_status, full_diff, _collect_summaries(store))
+    conventions = read_conventions(clone_dir)
+    prompt = build_prompt(issue_md, name_status, full_diff, _collect_summaries(store), conventions=conventions)
 
     result = opencode.run_agent(workspace, config, "reviewer", prompt, cwd=clone_dir, timeout=config.agent_timeout)
     if result.decision is None:
