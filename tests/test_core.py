@@ -35,6 +35,7 @@ from cheaphelp._internal.registry import Registry, RepoEntry, parse_slug
 from cheaphelp._internal.responder import (
     ATTRIBUTION_PREFIX,
     BOT_MARKER,
+    apply_decision,
     attribution_header,
     build_prompt,
     cheaphelp_message,
@@ -583,6 +584,10 @@ class _RecordingResponderGH:
 
     def authenticated_login(self) -> str:
         return "mybot"
+
+    def ensure_label(self, *_args: object, **_kwargs: object) -> None: ...
+    def add_labels(self, *_args: object, **_kwargs: object) -> None: ...
+    def remove_label(self, *_args: object, **_kwargs: object) -> None: ...
 
 
 def test_process_repo_proceeds_when_stage_unchanged_under_lock(
@@ -3401,3 +3406,186 @@ def test_classify_in_review_returns_rework() -> None:
     """An issue with only the in_review label always classifies to rework."""
     cfg = Config()
     assert classify(_issue_with([cfg.labels["in_review"]]), [], cfg) == "rework"
+
+
+# --- responder apply_decision label lifecycle --------------------------------
+def test_apply_decision_comment_adds_needs_human_label(tmp_path: Path) -> None:
+    """Comment action adds needs_human label after posting a reply."""
+
+    class _RecGH:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, tuple[object, ...]]] = []
+
+        def ensure_label(self, *a: object, **_kwargs: object) -> None:
+            self.calls.append(("ensure_label", a))
+
+        def add_labels(self, *a: object, **_kwargs: object) -> None:
+            self.calls.append(("add_labels", a))
+
+        def remove_label(self, *a: object, **_kwargs: object) -> None:
+            self.calls.append(("remove_label", a))
+
+        def create_comment(self, *a: object, **_kwargs: object) -> None:
+            self.calls.append(("create_comment", a))
+
+        def authenticated_login(self) -> str:
+            return "mybot"
+
+    gh = _RecGH()
+    ws = Workspace(tmp_path)
+    cfg = Config()
+    iss = _issue()
+    dec = {"action": "comment", "reply": "one q?"}
+    apply_decision(gh, ws, cfg, "o", "r", iss, dec)  # ty: ignore[invalid-argument-type]
+
+    needs_human = cfg.labels["needs_human"]
+    # find the order of create_comment and add_labels(needs_human)
+    ci = next(i for i, c in enumerate(gh.calls) if c[0] == "create_comment")
+    ai = next(i for i, c in enumerate(gh.calls) if c[0] == "add_labels" and needs_human in cast("list[str]", c[1][-1]))
+    assert ci < ai, "add_labels(needs_human) should come after create_comment"
+    # No ready or rejected labels were added.
+    assert not any(
+        c[0] == "add_labels"
+        and (cfg.labels["ready"] in cast("list[str]", c[1][-1]) or cfg.labels["rejected"] in cast("list[str]", c[1][-1]))
+        for c in gh.calls
+    )
+
+
+def test_apply_decision_comment_without_reply_still_adds_needs_human(tmp_path: Path) -> None:
+    """Comment action with no reply still adds needs_human; no comment posted."""
+
+    class _RecGH:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, tuple[object, ...]]] = []
+
+        def ensure_label(self, *a: object, **_kwargs: object) -> None:
+            self.calls.append(("ensure_label", a))
+
+        def add_labels(self, *a: object, **_kwargs: object) -> None:
+            self.calls.append(("add_labels", a))
+
+        def remove_label(self, *a: object, **_kwargs: object) -> None:
+            self.calls.append(("remove_label", a))
+
+        def create_comment(self, *a: object, **_kwargs: object) -> None:
+            self.calls.append(("create_comment", a))
+
+        def authenticated_login(self) -> str:
+            return "mybot"
+
+    gh = _RecGH()
+    ws = Workspace(tmp_path)
+    cfg = Config()
+    iss = _issue()
+    dec = {"action": "comment"}
+    apply_decision(gh, ws, cfg, "o", "r", iss, dec)  # ty: ignore[invalid-argument-type]
+
+    needs_human = cfg.labels["needs_human"]
+    assert any(c[0] == "add_labels" and needs_human in cast("list[str]", c[1][-1]) for c in gh.calls), (
+        "needs_human label must be added"
+    )
+    # No comment posted because no reply text.
+    assert not any(c[0] == "create_comment" for c in gh.calls)
+
+
+def test_apply_decision_finalize_removes_needs_human_and_adds_ready(tmp_path: Path) -> None:
+    """Finalize action removes needs_human and adds ready label."""
+
+    class _RecGH:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, tuple[object, ...]]] = []
+
+        def ensure_label(self, *a: object, **_kwargs: object) -> None:
+            self.calls.append(("ensure_label", a))
+
+        def add_labels(self, *a: object, **_kwargs: object) -> None:
+            self.calls.append(("add_labels", a))
+
+        def remove_label(self, *a: object, **_kwargs: object) -> None:
+            self.calls.append(("remove_label", a))
+
+        def create_comment(self, *a: object, **_kwargs: object) -> None:
+            self.calls.append(("create_comment", a))
+
+        def authenticated_login(self) -> str:
+            return "mybot"
+
+    gh = _RecGH()
+    ws = Workspace(tmp_path)
+    cfg = Config()
+    iss = _issue()
+    dec = {"action": "finalize", "issue_md": "# Spec"}
+    apply_decision(gh, ws, cfg, "o", "r", iss, dec)  # ty: ignore[invalid-argument-type]
+
+    needs_human = cfg.labels["needs_human"]
+    assert any(c[0] == "remove_label" and needs_human in c[1] for c in gh.calls), "needs_human label must be removed"
+    assert any(c[0] == "add_labels" and cfg.labels["ready"] in cast("list[str]", c[1][-1]) for c in gh.calls), (
+        "ready label must be added"
+    )
+    # issues.md was written
+    issue_md_path = ws.issue_dir("o", "r", 1) / "issues.md"
+    assert issue_md_path.exists()
+
+
+def test_apply_decision_reject_removes_needs_human_and_adds_rejected(tmp_path: Path) -> None:
+    """Reject action removes needs_human and adds rejected label."""
+
+    class _RecGH:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, tuple[object, ...]]] = []
+
+        def ensure_label(self, *a: object, **_kwargs: object) -> None:
+            self.calls.append(("ensure_label", a))
+
+        def add_labels(self, *a: object, **_kwargs: object) -> None:
+            self.calls.append(("add_labels", a))
+
+        def remove_label(self, *a: object, **_kwargs: object) -> None:
+            self.calls.append(("remove_label", a))
+
+        def create_comment(self, *a: object, **_kwargs: object) -> None:
+            self.calls.append(("create_comment", a))
+
+        def authenticated_login(self) -> str:
+            return "mybot"
+
+    gh = _RecGH()
+    ws = Workspace(tmp_path)
+    cfg = Config()
+    iss = _issue()
+    dec = {"action": "reject"}
+    apply_decision(gh, ws, cfg, "o", "r", iss, dec)  # ty: ignore[invalid-argument-type]
+
+    needs_human = cfg.labels["needs_human"]
+    assert any(c[0] == "remove_label" and needs_human in c[1] for c in gh.calls), "needs_human label must be removed"
+    assert any(c[0] == "add_labels" and cfg.labels["rejected"] in cast("list[str]", c[1][-1]) for c in gh.calls), (
+        "rejected label must be added"
+    )
+
+
+# --- classify needs_human routing -------------------------------------------
+def test_classify_needs_human_routes_to_responder_when_human_replied() -> None:
+    """needs_human routes to responder when the last comment is from a human."""
+    cfg = Config()
+    lab = cfg.labels
+    bot_comment = _comment(BOT_MARKER + "\nq?", "bot")
+    human_comment = _comment("answer", "alice")
+    result = classify(_issue_with([lab["needs_human"]]), [bot_comment, human_comment], cfg)
+    assert result == "responder"
+
+
+def test_classify_needs_human_stays_when_last_comment_is_bot() -> None:
+    """needs_human stays terminal when the last comment is from the bot."""
+    cfg = Config()
+    lab = cfg.labels
+    bot_comment = _comment(BOT_MARKER + "\nq?", "bot")
+    result = classify(_issue_with([lab["needs_human"]]), [bot_comment], cfg)
+    assert result == "needs-human"
+
+
+def test_classify_needs_human_stays_when_no_comments() -> None:
+    """needs_human stays terminal when there are no comments."""
+    cfg = Config()
+    lab = cfg.labels
+    result = classify(_issue_with([lab["needs_human"]]), [], cfg)
+    assert result == "needs-human"

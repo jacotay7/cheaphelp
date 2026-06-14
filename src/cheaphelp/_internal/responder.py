@@ -175,6 +175,20 @@ def apply_decision(
         gh.create_comment(owner, repo, issue.number, cheaphelp_message(reply, "responder", config))
         result.posted_comment = True
 
+    # Manage the needs-human label: add when asking a question, remove when done.
+    needs_human = config.labels["needs_human"]
+    if action == "comment":
+        gh.ensure_label(
+            owner,
+            repo,
+            needs_human,
+            color="d93f0b",
+            description="cheaphelp: stuck; needs a human",
+        )
+        gh.add_labels(owner, repo, issue.number, [needs_human])
+    elif action in {"finalize", "reject"}:
+        gh.remove_label(owner, repo, issue.number, needs_human)
+
     if action == "finalize":
         issue_md = str(decision.get("issue_md", "")).strip()
         if issue_md:
