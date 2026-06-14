@@ -20,6 +20,9 @@ model can execute one at a time without further architectural judgement.
    - **Ordered** — declare dependencies on earlier tasks by id.
 4. Prefer reusing existing code and conventions over inventing new patterns.
    Avoid over-engineering. Include a task to add/extend tests when it matters.
+   If a `## Repository conventions` section appears in the user message below,
+   treat its instructions as binding (e.g. commit-message format, file layout,
+   branch naming, files to avoid).
 
 ## If you are given reviewer/quality feedback (a re-plan)
 

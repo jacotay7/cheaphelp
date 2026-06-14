@@ -14,6 +14,7 @@ from pathlib import Path
 
 from cheaphelp._internal import gitutil, opencode
 from cheaphelp._internal.config import Config, Workspace
+from cheaphelp._internal.conventions import read_conventions
 from cheaphelp._internal.registry import RepoEntry
 from cheaphelp._internal.tasks import BLOCKED, DONE, PENDING, Task, TaskStore
 
@@ -25,7 +26,7 @@ def branch_name(number: int) -> str:
     return f"cheaphelp/issue-{number}"
 
 
-def build_prompt(task: Task, issue_md: str) -> str:
+def build_prompt(task: Task, issue_md: str, *, conventions: str = "") -> str:
     """Render the worker's user message for a single task.
 
     The worker implements and lightly verifies one task; it does NOT run the
@@ -34,24 +35,32 @@ def build_prompt(task: Task, issue_md: str) -> str:
     (and possibly expensive, e.g. multi-version) check is not repeated after
     every task.
     """
-    return "\n".join(
-        [
-            "You are implementing ONE task that is part of a larger issue.",
+    lines = [
+        "You are implementing ONE task that is part of a larger issue.",
+        "",
+        "## Issue context (for background only — do not implement the whole issue)",
+        "",
+        issue_md.strip() or "_(no spec)_",
+        "",
+        "## Your task",
+        "",
+        task.to_markdown(),
+    ]
+    if conventions.strip():
+        lines += [
             "",
-            "## Issue context (for background only — do not implement the whole issue)",
+            "## Repository conventions",
             "",
-            issue_md.strip() or "_(no spec)_",
-            "",
-            "## Your task",
-            "",
-            task.to_markdown(),
-            "",
-            "---",
-            "",
-            "Implement this task in the working directory, verify it, then report "
-            "following your output protocol (a single json block).",
-        ],
-    )
+            conventions.rstrip(),
+        ]
+    lines += [
+        "",
+        "---",
+        "",
+        "Implement this task in the working directory, verify it, then report "
+        "following your output protocol (a single json block).",
+    ]
+    return "\n".join(lines)
 
 
 @dataclass
@@ -80,7 +89,8 @@ def run_task(
     issue_md = issue_md_path.read_text(encoding="utf-8") if issue_md_path.exists() else ""
 
     store.set_status(task.id, "in_progress")
-    prompt = build_prompt(task, issue_md)
+    conventions = read_conventions(clone_dir)
+    prompt = build_prompt(task, issue_md, conventions=conventions)
     try:
         result = opencode.run_agent(workspace, config, "worker", prompt, cwd=clone_dir, timeout=config.agent_timeout)
     except subprocess.TimeoutExpired:

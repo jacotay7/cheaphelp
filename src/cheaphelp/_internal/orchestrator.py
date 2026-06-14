@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 
 from cheaphelp._internal import cleanup, gitutil, opencode, planner, responder, reviewer, worker
 from cheaphelp._internal.config import Config, Workspace
+from cheaphelp._internal.conventions import read_conventions
 from cheaphelp._internal.env import GITHUB_TOKEN_KEY, OPENROUTER_API_KEY, load_into_environ
 from cheaphelp._internal.github import GitHubClient, Issue
 from cheaphelp._internal.gitutil import ensure_clone
@@ -134,7 +135,7 @@ def _short_exc(exc: Exception) -> str:
 
 
 def _run_responder(gh, workspace, config, repo, issue, comments, bot_login, cwd, log, report) -> None:  # noqa: ANN001
-    prompt = responder.build_prompt(issue, comments, bot_login)
+    prompt = responder.build_prompt(issue, comments, bot_login, conventions=read_conventions(cwd))
     log(f"  · {repo.slug}#{issue.number}: running responder ({config.model_for('responder')})…")
     result = opencode.run_agent(workspace, config, "responder", prompt, cwd=cwd, timeout=config.agent_timeout)
     if result.decision is None:
@@ -162,6 +163,7 @@ def _run_planner(gh, workspace, config, repo, issue, cwd, log, report) -> None: 
         spec_path.read_text(encoding="utf-8"),
         replan_notes=replan_notes,
         existing_tasks=existing_tasks,
+        conventions=read_conventions(cwd),
     )
     log(f"  · {repo.slug}#{issue.number}: running planner ({config.model_for('planner')})…")
     result = opencode.run_agent(workspace, config, "planner", prompt, cwd=cwd, timeout=config.agent_timeout)

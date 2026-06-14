@@ -13,6 +13,7 @@ from pathlib import Path
 
 from cheaphelp._internal import gitutil, opencode
 from cheaphelp._internal.config import Config, Workspace
+from cheaphelp._internal.conventions import read_conventions
 from cheaphelp._internal.github import GitHubClient
 from cheaphelp._internal.registry import RepoEntry
 from cheaphelp._internal.responder import cheaphelp_message
@@ -32,38 +33,46 @@ def _collect_summaries(store: TaskStore) -> str:
     return "\n\n".join(parts)
 
 
-def build_prompt(issue_md: str, name_status: str, full_diff: str, summaries: str) -> str:
+def build_prompt(issue_md: str, name_status: str, full_diff: str, summaries: str, *, conventions: str = "") -> str:
     """Render the reviewer's user message."""
     diff = full_diff
     if len(diff) > _MAX_DIFF_CHARS:
         diff = diff[:_MAX_DIFF_CHARS] + "\n\n... (diff truncated) ...\n"
-    return "\n".join(
-        [
-            "## Original specification (issues.md)",
+    lines = [
+        "## Original specification (issues.md)",
+        "",
+        issue_md.strip() or "_(no spec)_",
+        "",
+        "## Task summaries",
+        "",
+        summaries or "_(none)_",
+        "",
+        "## Changed files",
+        "",
+        "```",
+        name_status or "(no changes)",
+        "```",
+        "",
+        "## Full diff (branch vs base)",
+        "",
+        "```diff",
+        diff or "(empty)",
+        "```",
+    ]
+    if conventions.strip():
+        lines += [
             "",
-            issue_md.strip() or "_(no spec)_",
+            "## Repository conventions",
             "",
-            "## Task summaries",
-            "",
-            summaries or "_(none)_",
-            "",
-            "## Changed files",
-            "",
-            "```",
-            name_status or "(no changes)",
-            "```",
-            "",
-            "## Full diff (branch vs base)",
-            "",
-            "```diff",
-            diff or "(empty)",
-            "```",
-            "",
-            "---",
-            "",
-            "Review the combined result and decide, following your output protocol (a single json block).",
-        ],
-    )
+            conventions.rstrip(),
+        ]
+    lines += [
+        "",
+        "---",
+        "",
+        "Review the combined result and decide, following your output protocol (a single json block).",
+    ]
+    return "\n".join(lines)
 
 
 @dataclass
@@ -181,7 +190,8 @@ def review_issue(
     issue_md_path = issue_dir / "issues.md"
     issue_md = issue_md_path.read_text(encoding="utf-8") if issue_md_path.exists() else ""
     name_status, full_diff = gitutil.diff_against_base(clone_dir, repo)
-    prompt = build_prompt(issue_md, name_status, full_diff, _collect_summaries(store))
+    conventions = read_conventions(clone_dir)
+    prompt = build_prompt(issue_md, name_status, full_diff, _collect_summaries(store), conventions=conventions)
 
     result = opencode.run_agent(workspace, config, "reviewer", prompt, cwd=clone_dir, timeout=config.agent_timeout)
     if result.decision is None:
