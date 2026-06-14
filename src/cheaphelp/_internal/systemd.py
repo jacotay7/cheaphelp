@@ -49,7 +49,7 @@ class UnitFiles:
 
 def _exec_start() -> str:
     """Command the service runs. Uses the current interpreter's `-m cheaphelp`."""
-    return f"{sys.executable} -m cheaphelp run --once"
+    return f"{sys.executable} -m cheaphelp run"
 
 
 def render_units(*, home: Path | None, interval: str, description: str = "cheaphelp") -> UnitFiles:
