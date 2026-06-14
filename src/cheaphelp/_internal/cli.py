@@ -183,16 +183,14 @@ def get_parser() -> argparse.ArgumentParser:
     p_run.add_argument(
         "--continuous",
         action="store_true",
-        help="Run until a tick produces no work, capped at --max-ticks. "
-        "Mutually exclusive with --num-ticks.",
+        help="Run until a tick produces no work, capped at --max-ticks. Mutually exclusive with --num-ticks.",
     )
     p_run.add_argument(
         "--max-ticks",
         type=int,
         default=20,
         metavar="N",
-        help="Hard cap on total ticks when --continuous is used (default 20). "
-        "Ignored when --num-ticks is set.",
+        help="Hard cap on total ticks when --continuous is used (default 20). Ignored when --num-ticks is set.",
     )
     p_run.add_argument(
         "--sleep",

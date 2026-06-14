@@ -1465,7 +1465,9 @@ def test_normalize_interval() -> None:
 def test_render_units_contains_exec_and_interval(tmp_path: Path) -> None:
     units = systemd.render_units(home=tmp_path, interval="15m")
     assert "OnUnitActiveSec=15min" in units.timer
-    assert "run --once" in units.service
+    assert "--once" not in units.service, "service must not use the removed --once flag"
+    assert "-m cheaphelp run" in units.service
+    assert units.service.rstrip().endswith("-m cheaphelp run")
     assert f"CHEAPHELP_HOME={tmp_path}" in units.service
 
 
