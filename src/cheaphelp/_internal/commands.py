@@ -30,7 +30,7 @@ from cheaphelp._internal.github import GitHubClient, GitHubError
 from cheaphelp._internal.opencode import UsageData
 from cheaphelp._internal.orchestrator import classify, tick
 from cheaphelp._internal.registry import Registry, RepoEntry, parse_slug
-from cheaphelp._internal.tasks import IssueCostStore
+from cheaphelp._internal.tasks import IssueCostStore, TaskStore
 
 _LOG_TAIL_LINES = 50
 
@@ -508,6 +508,133 @@ def cmd_clean(args: argparse.Namespace) -> int:
 
     verb = "Would remove" if dry_run else "Removed"
     print(f"{verb} {total} clone(s).")
+    return 0
+
+
+# --- retry ------------------------------------------------------------------
+def cmd_retry(args: argparse.Namespace) -> int:
+    """Re-start an issue that was stuck with the ``needs-human`` label.
+
+    Clears the ``needs-human`` and ``in-progress`` labels, adds
+    ``needs-replan``, resets all task attempts and unblocks blocked tasks,
+    removes stale ``replan.md``, and runs one orchestrator tick.
+    """
+    ws = _workspace(args)
+    if (rc := _require_workspace(ws)) is not None:
+        return rc
+
+    try:
+        owner, name = parse_slug(args.slug)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+    config = ws.load_config()
+    lab = config.labels
+
+    if Registry(ws.registry_path).find(owner, name) is None:
+        print(f"{owner}/{name} is not registered.", file=sys.stderr)
+        return 1
+
+    load_into_environ(ws.env_path)
+    token = os.environ.get(GITHUB_TOKEN_KEY, "")
+    if not token:
+        print(f"{GITHUB_TOKEN_KEY} not set; add it to {ws.env_path}", file=sys.stderr)
+        return 1
+
+    try:
+        number = int(args.number)
+    except (TypeError, ValueError):
+        print(f"Invalid issue number: {args.number!r}", file=sys.stderr)
+        return 2
+
+    with GitHubClient(token, retry_attempts=config.retry_attempts, retry_base_delay=config.retry_base_delay) as gh:
+        try:
+            issue = gh.get_issue(owner, name, number)
+        except GitHubError as exc:
+            print(f"GitHub API error: {exc}", file=sys.stderr)
+            return 1
+
+        if lab["needs_human"] not in issue.labels:
+            print(
+                f"{owner}/{name}#{number} is not labeled '{lab['needs_human']}'; nothing to retry.",
+                file=sys.stderr,
+            )
+            return 2
+
+        print(
+            f"Retry plan for {owner}/{name}#{number}:",
+        )
+        print(f"  - remove label '{lab['needs_human']}'")
+        print(f"  - remove label '{lab['in_progress']}' (if present)")
+        print(f"  - add label '{lab['needs_replan']}'")
+        print("  - reset all task attempts to 0; flip BLOCKED tasks to PENDING")
+        print("  - delete stale replan.md (if present)")
+        print("  - run one orchestrator tick()")
+
+        # Confirmation prompt.
+        if not getattr(args, "yes", False):
+            if not sys.stdin.isatty():
+                print(
+                    "Refusing to run without --yes in a non-interactive shell.",
+                    file=sys.stderr,
+                )
+                return 1
+            try:
+                answer = input("Proceed? [y/N] ")
+            except EOFError:
+                answer = ""
+            if answer.strip().lower() not in {"y", "yes"}:
+                print("Aborted.")
+                return 0
+
+        # Dry-run branch.
+        if getattr(args, "dry_run", False):
+            print("Dry run; no changes made.")
+            return 0
+
+        # Live branch — label changes.
+        gh.remove_label(owner, name, number, lab["needs_human"])
+        if lab["in_progress"] in issue.labels:
+            gh.remove_label(owner, name, number, lab["in_progress"])
+        gh.ensure_label(
+            owner,
+            name,
+            lab["needs_replan"],
+            color="fbca04",
+            description="cheaphelp: reviewer sent back to planner",
+        )
+        gh.add_labels(owner, name, number, [lab["needs_replan"]])
+
+    # Task state reset (outside the GH client context manager).
+    TaskStore(ws.issue_dir(owner, name, number)).reset_all()
+
+    # Remove stale replan.md.
+    replan = ws.issue_dir(owner, name, number) / "replan.md"
+    if replan.exists():
+        replan.unlink()
+
+    # Run one orchestrator tick.
+    log_path = ws.logs_dir / (f"run-{datetime.datetime.now(datetime.timezone.utc).date().isoformat()}.log")
+    now = datetime.datetime.now(datetime.timezone.utc)
+    header = f"[{now:%Y-%m-%d %H:%M:%S}] --- retry {owner}/{name}#{number} ---"
+
+    def log(msg: str) -> None:
+        print(msg)
+        try:
+            with log_path.open("a", encoding="utf-8") as f:
+                f.write(msg + "\n")
+        except OSError:
+            pass
+
+    log(header)
+    report = tick(ws, dry_run=False, log=log)
+    if report.error:
+        print(f"\nError: {report.error}", file=sys.stderr)
+        return 1
+    print(f"\nDone. {report.total_turns} agent turn(s) across {len(report.repos)} repo(s).")
+    for cost_line in _format_cost_lines(report):
+        log(cost_line)
     return 0
 
 

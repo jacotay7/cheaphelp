@@ -251,6 +251,26 @@ def get_parser() -> argparse.ArgumentParser:
     )
     p_clean.set_defaults(func=commands.cmd_clean)
 
+    # retry
+    p_retry = subparsers.add_parser(
+        "retry",
+        help="Un-stick an issue labeled 'needs-human' and run one orchestrator tick.",
+    )
+    p_retry.add_argument("slug", help="Repository as owner/name or a GitHub URL.")
+    p_retry.add_argument("number", type=int, help="Issue number to retry.")
+    p_retry.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Report the planned actions without making API or filesystem changes.",
+    )
+    p_retry.add_argument(
+        "-y",
+        "--yes",
+        action="store_true",
+        help="Skip the confirmation prompt.",
+    )
+    p_retry.set_defaults(func=commands.cmd_retry)
+
     # logs
     p_logs = subparsers.add_parser("logs", help="Show recent run activity, or follow it live.")
     p_logs.add_argument(
