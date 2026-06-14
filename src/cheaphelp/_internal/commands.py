@@ -147,7 +147,7 @@ def cmd_init(args: argparse.Namespace) -> int:
     print("\nNext steps:")
     print("  1. Ensure your tokens are set:    cheaphelp doctor")
     print("  2. Register a repo:               cheaphelp repo add owner/name")
-    print("  3. Try a dry run:                 cheaphelp run --once --dry-run")
+    print("  3. Try a dry run:                 cheaphelp run --dry-run")
     print("  4. Install the timer:             cheaphelp systemd install --interval 10m")
     if not fresh:
         print("\n(Existing workspace updated; nothing was overwritten.)")
