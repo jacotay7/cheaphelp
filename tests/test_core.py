@@ -1220,7 +1220,7 @@ def test_run_responder_forwards_conventions(
     report = orchestrator.RepoReport(slug=repo.slug)
 
     orchestrator._run_responder(
-        fake_gh,  # ty: ignore[invalid-argument-type]
+        fake_gh,
         ws,
         Config(),
         repo,
@@ -1274,7 +1274,7 @@ def test_run_planner_forwards_conventions(
     report = orchestrator.RepoReport(slug=repo.slug)
 
     orchestrator._run_planner(
-        fake_gh,  # ty: ignore[invalid-argument-type]
+        fake_gh,
         ws,
         Config(),
         repo,
@@ -1319,7 +1319,7 @@ def test_run_responder_no_conventions_when_file_absent(
     report = orchestrator.RepoReport(slug=repo.slug)
 
     orchestrator._run_responder(
-        fake_gh,  # ty: ignore[invalid-argument-type]
+        fake_gh,
         ws,
         Config(),
         repo,
