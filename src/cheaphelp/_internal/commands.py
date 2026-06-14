@@ -97,6 +97,20 @@ def _format_cost_lines(report: object) -> list[str]:
     return lines
 
 
+def _format_budget_line(report: object) -> list[str]:
+    """One-line budget summary for the tick, or [] when unlimited/no spend."""
+    cap = float(getattr(report, "daily_budget", 0.0))
+    spend = float(getattr(report, "daily_spend", 0.0))
+    exhausted = bool(getattr(report, "budget_exhausted", False))
+    if cap <= 0.0 and not exhausted:
+        return []
+    if exhausted:
+        return [
+            f"Budget: EXHAUSTED — spent ${spend:.3f} of ${cap:.3f} daily cap. Resumes tomorrow (UTC).",
+        ]
+    return [f"Budget: ${spend:.3f} / ${cap:.3f} daily cap"]
+
+
 # --- init ------------------------------------------------------------------
 def cmd_init(args: argparse.Namespace) -> int:
     ws = _workspace(args)
@@ -313,6 +327,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     print(f"\nDone. {report.total_turns} agent turn(s) across {len(report.repos)} repo(s).")
     for cost_line in _format_cost_lines(report):
         log(cost_line)
+    for budget_line in _format_budget_line(report):
+        log(budget_line)
     return 0
 
 
