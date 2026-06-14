@@ -12,7 +12,7 @@ from cheaphelp._internal.config import DEFAULT_AGENT_TIMEOUT, DEFAULT_MODELS, Co
 from cheaphelp._internal.env import parse_env, read_env_file, update_env_file
 from cheaphelp._internal.github import Comment, Issue
 from cheaphelp._internal.lock import RunLock
-from cheaphelp._internal.orchestrator import _process_repo, _short_exc, classify
+from cheaphelp._internal.orchestrator import _process_repo, _short_exc, classify, parse_depends_on
 from cheaphelp._internal.registry import Registry, RepoEntry, parse_slug
 from cheaphelp._internal.responder import (
     ATTRIBUTION_PREFIX,
@@ -191,6 +191,77 @@ def test_process_repo_skips_locked_issue(
     assert report.issues_considered == 1
     assert report.issues_skipped == 1
     assert report.turns_taken == 0
+
+
+def test_parse_depends_on() -> None:
+    assert parse_depends_on("# Title\n\nDepends-on: #41, #42\n\n## Summary\n") == [41, 42]
+    # Case-insensitive, "Depends on" spelling, bare numbers, dedup + sort.
+    assert parse_depends_on("depends on: 7 and #3, #7") == [3, 7]
+    # No directive -> empty.
+    assert parse_depends_on("# Title\n\nNo dependencies here.\n") == []
+
+
+class _IssuesGH:
+    """GitHub stand-in returning a fixed issue list (for dependency-gating tests)."""
+
+    def __init__(self, issues: list[Issue]) -> None:
+        self._issues = issues
+
+    def list_open_issues(self, _owner: str, _name: str) -> list[Issue]:
+        return list(self._issues)
+
+    def list_issue_comments(self, _owner: str, _name: str, _number: int) -> list[Comment]:
+        return []
+
+    def authenticated_login(self) -> str:
+        return "mybot"
+
+
+def test_process_repo_defers_issue_with_open_dependency(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    monkeypatch.setenv("CHEAPHELP_AGENT_MOCK", "/dev/null")  # _is_mock(): no clone/agent
+    repo = RepoEntry(owner="octocat", name="hello")
+    lab = Config().labels
+
+    # Issue #1 is ready to plan but its spec declares a dependency on open #2.
+    issue_dir = ws.issue_dir(repo.owner, repo.name, 1)
+    issue_dir.mkdir(parents=True, exist_ok=True)
+    (issue_dir / "issues.md").write_text("# Thing\n\nDepends-on: #2\n", encoding="utf-8")
+
+    ready = Issue(number=1, title="t", body="b", state="open", labels=[lab["ready"]], user="u", html_url="")
+    dep = Issue(number=2, title="t2", body="b", state="open", labels=[lab["in_review"]], user="u", html_url="")
+
+    # While #2 is open, #1 is deferred (and #2 itself is terminal, not actionable).
+    report = _process_repo(
+        _IssuesGH([ready, dep]),  # ty: ignore[invalid-argument-type]
+        ws,
+        Config(),
+        repo,
+        "mybot",
+        "token",
+        dry_run=False,
+        log=lambda _m: None,
+    )
+    assert report.issues_considered == 0
+    assert any("waiting on #2" in a for a in report.actions)
+
+    # Once #2 is closed (absent from the open list), #1 is no longer deferred.
+    report = _process_repo(
+        _IssuesGH([ready]),  # ty: ignore[invalid-argument-type]
+        ws,
+        Config(),
+        repo,
+        "mybot",
+        "token",
+        dry_run=True,  # dry-run: just confirm it is now considered work
+        log=lambda _m: None,
+    )
+    assert report.issues_considered == 1
+    assert not any("waiting" in a for a in report.actions)
 
 
 def test_run_build_caps_tasks_per_tick(
