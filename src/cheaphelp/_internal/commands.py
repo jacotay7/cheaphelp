@@ -15,7 +15,7 @@ import sys
 from dataclasses import asdict
 from pathlib import Path
 
-from cheaphelp._internal import opencode, systemd
+from cheaphelp._internal import cleanup, opencode, systemd
 from cheaphelp._internal.config import Config, Workspace
 from cheaphelp._internal.env import (
     GITHUB_TOKEN_KEY,
@@ -385,6 +385,42 @@ def cmd_status(args: argparse.Namespace) -> int:
     except GitHubError as exc:
         print(f"GitHub API error: {exc}", file=sys.stderr)
         return 1
+    return 0
+
+
+def cmd_clean(args: argparse.Namespace) -> int:
+    ws = _workspace(args)
+    if (rc := _require_workspace(ws)) is not None:
+        return rc
+
+    dry_run = bool(getattr(args, "dry_run", False))
+    repos = Registry(ws.registry_path).load()
+    total = 0
+
+    # Clones for repos that are no longer registered (no token required).
+    total += len(cleanup.prune_orphan_clones(ws, repos, dry_run=dry_run, log=print))
+
+    # Build clones for closed issues of each registered repo (needs the open set).
+    load_into_environ(ws.env_path)
+    token = os.environ.get(GITHUB_TOKEN_KEY, "")
+    if token and repos:
+        try:
+            with GitHubClient(token) as gh:
+                for repo in repos:
+                    try:
+                        open_numbers = {i.number for i in gh.list_open_issues(repo.owner, repo.name)}
+                    except GitHubError as exc:
+                        print(f"  ! {repo.slug}: could not list issues: {exc}", file=sys.stderr)
+                        continue
+                    total += len(cleanup.prune_repo_work_clones(ws, repo, open_numbers, dry_run=dry_run, log=print))
+        except GitHubError as exc:
+            print(f"GitHub API error: {exc}", file=sys.stderr)
+            return 1
+    elif not token:
+        print(f"({GITHUB_TOKEN_KEY} not set; swept orphans only — per-issue pruning needs a token.)")
+
+    verb = "Would remove" if dry_run else "Removed"
+    print(f"{verb} {total} clone(s).")
     return 0
 
 
