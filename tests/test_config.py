@@ -108,6 +108,32 @@ def test_retry_base_delay_default_and_roundtrip() -> None:
     assert Config.from_dict({"retry_base_delay": "0.5"}).retry_base_delay == 0.5
 
 
+def test_config_daily_budget_usd_default_and_roundtrip() -> None:
+    # Default when constructed with no args.
+    assert Config().daily_budget_usd == 0.0
+    # Default when the key is absent from the on-disk dict.
+    assert Config.from_dict({}).daily_budget_usd == 0.0
+    # User override is honoured by from_dict and preserved by to_dict.
+    cfg = Config.from_dict({"daily_budget_usd": 5.0})
+    assert cfg.daily_budget_usd == 5.0
+    assert Config.from_dict(cfg.to_dict()).daily_budget_usd == 5.0
+    # String values are coerced via float(...).
+    assert Config.from_dict({"daily_budget_usd": "2.5"}).daily_budget_usd == 2.5
+
+
+def test_config_budget_warn_at_default_and_roundtrip() -> None:
+    # Default when constructed with no args.
+    assert Config().budget_warn_at == 0.80
+    # Default when the key is absent from the on-disk dict.
+    assert Config.from_dict({}).budget_warn_at == 0.80
+    # User override is honoured by from_dict and preserved by to_dict.
+    cfg = Config.from_dict({"budget_warn_at": 0.5})
+    assert cfg.budget_warn_at == 0.5
+    assert Config.from_dict(cfg.to_dict()).budget_warn_at == 0.5
+    # String values are coerced via float(...).
+    assert Config.from_dict({"budget_warn_at": "0.9"}).budget_warn_at == 0.9
+
+
 # --- env -------------------------------------------------------------------
 def test_parse_env_handles_quotes_and_comments() -> None:
     parsed = parse_env('# comment\nexport A="hello"\nB=plain\n\nC=\n')

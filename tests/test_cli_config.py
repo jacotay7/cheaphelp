@@ -239,3 +239,59 @@ def test_config_no_workspace_exits_1(
     assert rc == 1
     err = capsys.readouterr().err
     assert "No workspace" in err
+
+
+# --- budget config CLI tests -------------------------------------------------
+def test_config_set_daily_budget_usd_persists(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """`config set daily_budget_usd 5.0` persists to config.json."""
+    ws = _setup_workspace(tmp_path)
+    rc = main(["--home", str(ws.home), "config", "set", "daily_budget_usd", "5.0"])
+    assert rc == 0
+    capsys.readouterr()  # discard output
+    config = ws.load_config()
+    assert config.daily_budget_usd == 5.0
+
+
+def test_config_get_daily_budget_usd_returns_value(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """`config get daily_budget_usd` prints the configured value and exits 0."""
+    ws = _setup_workspace(tmp_path)
+    rc = main(["--home", str(ws.home), "config", "set", "daily_budget_usd", "5.0"])
+    assert rc == 0
+    capsys.readouterr()
+
+    rc = main(["--home", str(ws.home), "config", "get", "daily_budget_usd"])
+    assert rc == 0
+    out = capsys.readouterr().out.strip()
+    assert out == "5.0"
+
+
+def test_config_set_budget_warn_at_persists(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """`config set budget_warn_at 0.5` persists to config.json."""
+    ws = _setup_workspace(tmp_path)
+    rc = main(["--home", str(ws.home), "config", "set", "budget_warn_at", "0.5"])
+    assert rc == 0
+    capsys.readouterr()  # discard output
+    config = ws.load_config()
+    assert config.budget_warn_at == 0.5
+
+
+def test_config_show_includes_budget_keys(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """`config show` output contains both `daily_budget_usd:` and `budget_warn_at:`."""
+    ws = _setup_workspace(tmp_path)
+    rc = main(["--home", str(ws.home), "config", "show"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "daily_budget_usd:" in out
+    assert "budget_warn_at:" in out

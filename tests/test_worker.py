@@ -18,6 +18,7 @@ from cheaphelp._internal import (
 from cheaphelp._internal.config import Config, Workspace
 from cheaphelp._internal.github import Issue
 from cheaphelp._internal.registry import RepoEntry
+from cheaphelp._internal.spend import DailySpendTracker
 from cheaphelp._internal.tasks import BLOCKED, DONE, PENDING, TaskStore
 
 
@@ -244,3 +245,56 @@ def test_run_build_records_worker_and_reviewer_costs(
     assert report.issue_costs[1]["worker"][0] == worker_usage
     assert report.issue_costs[1]["worker"][1] == worker_usage
     assert report.issue_costs[1]["reviewer"] == [reviewer_usage]
+
+
+def test_run_build_aborts_before_reviewer_when_budget_exhausted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After the worker runs, the tracker reports spend >= cap, so the reviewer must NOT be called."""
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    repo = RepoEntry(owner="octocat", name="hello")
+    issue = Issue(number=1, title="t", body="b", state="open", labels=[], user="u", html_url="")
+    issue_dir = ws.issue_dir(repo.owner, repo.name, issue.number)
+    store = TaskStore(issue_dir)
+    _, tasks = planner.parse_manifest({"tasks": [{"id": "t1", "title": "one"}]})
+    store.materialize(tasks)
+
+    monkeypatch.setattr(gitutil, "ensure_work_clone", lambda *_a, **_k: None)
+    monkeypatch.setattr(gitutil, "diff_stat", lambda *_a, **_k: None)
+    monkeypatch.setattr(gitutil, "commit_all", lambda *_a, **_k: False)
+    monkeypatch.setattr(gitutil, "push_branch", lambda *_a, **_k: None)
+
+    # Worker usage = 0.005, cap = 0.001 => after worker runs, cap is exceeded.
+    worker_usage = opencode.UsageData(cost_usd=0.005)
+
+    def fake_run_task(_ws, _cfg, _repo, number, task, _work_dir, *, token):  # noqa: ANN001, ANN202
+        store.set_status(task.id, DONE, summary="ok")
+        return worker.WorkResult(task_id=task.id, status=DONE, committed=True, usage=worker_usage)
+
+    monkeypatch.setattr(worker, "run_task", fake_run_task)
+
+    reviewer_called: list[str] = []
+
+    def fake_review_issue(*_a: object, **_kw: object) -> object:
+        reviewer_called.append("called")
+        return reviewer.ReviewResult(number=1, decision="open_pr")
+
+    monkeypatch.setattr(reviewer, "review_issue", fake_review_issue)
+
+    gh = _RecBuildGH()
+    report = orchestrator.RepoReport(slug=repo.slug)
+    tracker = DailySpendTracker(ws.state_dir)
+    cfg = Config.from_dict({"daily_budget_usd": 0.001})
+
+    orchestrator._run_build(gh, ws, cfg, repo, issue, "token", lambda _m: None, report, tracker=tracker)
+
+    # Reviewer must NOT have been called.
+    assert reviewer_called == [], "reviewer was called despite budget exhaustion"
+
+    # A "budget-exceeded" action was appended (from the mid-build or post-worker budget check).
+    budget_actions = [a for a in report.actions if "budget-exceeded" in a]
+    assert len(budget_actions) >= 1
+
+    assert report.budget_exhausted is True
