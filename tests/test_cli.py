@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+import argparse
 import datetime
 import json
 import re
-import argparse
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
