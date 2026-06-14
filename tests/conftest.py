@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 from cheaphelp._internal import pr_state
+from cheaphelp._internal.config import Config, Workspace
+from cheaphelp._internal.env import GITHUB_TOKEN_KEY, update_env_file
 from cheaphelp._internal.github import Comment, GitHubClient, Issue, PRReviewComment
 
 if TYPE_CHECKING:
@@ -170,3 +173,70 @@ class FakeGitHubClient(GitHubClient):
     def list_pr_review_comments(self, owner: str, repo: str, pr_number: int) -> list[PRReviewComment]:
         self.calls.append(("list_pr_review_comments", (owner, repo, pr_number)))
         return list(self.pr_review_comments.get((owner, repo, pr_number), []))
+
+
+def _setup_workspace(tmp_path: Path) -> Workspace:
+    """Build a fresh, initialised workspace under ``tmp_path``."""
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    ws.save_config(Config())  # make Workspace.exists() return True
+    return ws
+
+
+def _usage_data(
+    prompt_tokens: int = 0,
+    completion_tokens: int = 0,
+    total_tokens: int = 0,
+    cost_usd: float = 0.0,
+) -> SimpleNamespace:
+    """Build a UsageData-like SimpleNamespace for test stubs."""
+    return SimpleNamespace(
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=total_tokens,
+        cost_usd=cost_usd,
+    )
+
+
+# Test-only token string written into the workspace `.env` by the CLI
+# tests. A real `GITHUB_TOKEN` is never read or sent anywhere in tests; this
+# value just has to be non-empty so the command does not exit on the no-token
+# branch.
+_TEST_TOKEN = "test-token"
+
+
+class _FakeGH:
+    """Stand-in for ``commands.GitHubClient`` used by the CLI tests.
+
+    The fake holds per-repo issue lists and per-issue comment lists in plain
+    dicts so tests can seed exactly the data the command should consume.
+    """
+
+    def __init__(self, token: str, **kwargs: object) -> None:
+        self.token = token
+        self.kwargs = kwargs
+        self.login = "mybot"
+        self.issues: dict[str, list[Issue]] = {}
+        self.comments: dict[tuple[str, int], list[Comment]] = {}
+        self.instantiated = False
+
+    def __enter__(self) -> _FakeGH:
+        self.instantiated = True
+        return self
+
+    def __exit__(self, *exc: object) -> bool:
+        return False
+
+    def authenticated_login(self) -> str:
+        return self.login
+
+    def list_open_issues(self, owner: str, name: str) -> list[Issue]:
+        return list(self.issues.get(f"{owner}/{name}", []))
+
+    def list_issue_comments(self, owner: str, name: str, number: int) -> list[Comment]:
+        return list(self.comments.get((f"{owner}/{name}", number), []))
+
+
+def _seed_workspace_env(ws: Workspace, *, token: str) -> None:
+    """Write a ``GITHUB_TOKEN`` into the workspace ``.env`` file."""
+    update_env_file(ws.env_path, {GITHUB_TOKEN_KEY: token})
