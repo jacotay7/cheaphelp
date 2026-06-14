@@ -239,6 +239,58 @@ def _quality_gate(gh, workspace, config, repo, number, work_dir, log, report) ->
     return False
 
 
+def _check_blast_radius(gh, workspace, config, repo, number, work_dir, log, report) -> bool:  # noqa: ANN001, ARG001
+    """Bypass the reviewer when the branch diff vs base exceeds the per-repo limits.
+
+    Returns True if the diff is within limits (proceed to the reviewer) or if
+    we can't measure it (safe default). On a violation, posts an attributed
+    comment with the diff stats, adds the `needs-human` label, removes
+    `in-progress`, and returns False so the caller skips the reviewer.
+    """
+    stats = gitutil.diff_stat(work_dir, repo)
+    if stats is None:
+        return True  # unparseable / no diff -> don't block
+    files, insertions, deletions = stats
+
+    files_ok = repo.max_diff_files == 0 or files <= repo.max_diff_files
+    lines = insertions + deletions
+    lines_ok = repo.max_diff_lines == 0 or lines <= repo.max_diff_lines
+    if files_ok and lines_ok:
+        return True
+
+    def _fmt(value: int) -> str:
+        return "unlimited" if value == 0 else str(value)
+
+    body = (
+        f"The diff exceeds the configured blast-radius guardrail and was not "
+        f"opened as a PR. The branch remains on the remote for inspection.\n\n"
+        f"- Files changed: {files} (limit: {_fmt(repo.max_diff_files)})\n"
+        f"- Lines added: {insertions} (limit: {_fmt(repo.max_diff_lines)})\n"
+        f"- Lines removed: {deletions}\n\n"
+        f"A human can widen the limits via "
+        f"`cheaphelp repo set --max-diff-files N --max-diff-lines N {repo.slug}` "
+        f"or split the work into smaller issues."
+    )
+    gh.ensure_label(
+        repo.owner,
+        repo.name,
+        config.labels["needs_human"],
+        color="d93f0b",
+        description="cheaphelp: stuck; needs a human",
+    )
+    gh.add_labels(repo.owner, repo.name, number, [config.labels["needs_human"]])
+    gh.remove_label(repo.owner, repo.name, number, config.labels["in_progress"])
+    gh.create_comment(
+        repo.owner,
+        repo.name,
+        number,
+        responder.cheaphelp_message(body, "blast-radius", config),
+    )
+    log(f"  ! {repo.slug}#{number}: blast-radius exceeded ({files} files, {lines} lines) -> needs-human")
+    report.actions.append(f"#{number}: blast-radius exceeded")
+    return False
+
+
 def _run_build(gh, workspace, config, repo, issue, token, log, report) -> None:  # noqa: ANN001
     """Worker + reviewer stage for a planned issue."""
     number = issue.number
@@ -294,6 +346,11 @@ def _run_build(gh, workspace, config, repo, issue, token, log, report) -> None: 
     if store.all_done(tasks):
         # Quality gate: a failing check never becomes a PR — loop back to planning.
         if repo.checks and not _quality_gate(gh, workspace, config, repo, number, work_dir, log, report):
+            return
+        # Blast-radius guardrail: skip the reviewer (and its LLM call) when the
+        # diff is too large to open as a PR. Routes the issue to needs-human
+        # with a diff-stats comment; the branch stays on the remote.
+        if not _check_blast_radius(gh, workspace, config, repo, number, work_dir, log, report):
             return
         log(f"  > {repo.slug}#{number}: all tasks done; running reviewer")
         rr = reviewer.review_issue(gh, workspace, config, repo, number, work_dir, token=token)

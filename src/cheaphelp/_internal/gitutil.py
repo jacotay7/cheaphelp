@@ -14,6 +14,7 @@ push commands and is never stored in git config.
 
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 
@@ -143,3 +144,50 @@ def diff_against_base(clone_dir: Path, repo: RepoEntry) -> tuple[str, str]:
     name_status = _run(["diff", "--name-status", ref], cwd=clone_dir)
     full = _run(["diff", ref], cwd=clone_dir)
     return name_status, full
+
+
+# Matches the summary line of `git diff --stat` output, e.g.:
+#   "1 file changed, 1 insertion(+)"
+#   "2 files changed, 3 insertions(+), 1 deletion(-)"
+#   "3 files changed, 45 deletions(-)"
+_DIFF_STAT_RE = re.compile(
+    r"(?P<files>\d+)\s+files?\s+changed"
+    r"(?:,\s+(?P<insertions>\d+)\s+insertions?\(\+\))?"
+    r"(?:,\s+(?P<deletions>\d+)\s+deletions?\(-\))?",
+)
+
+
+def parse_diff_stat(output: str) -> tuple[int, int, int] | None:
+    """Parse the summary line of ``git diff --stat`` output.
+
+    Returns ``(files, insertions, deletions)`` on a match; ``None`` when the
+    output has no recognisable summary line. Missing ``insertions`` /
+    ``deletions`` segments are treated as 0 (e.g. pure-additions or
+    pure-deletions diffs).
+    """
+    for line in output.splitlines():
+        match = _DIFF_STAT_RE.search(line)
+        if match:
+            return (
+                int(match.group("files")),
+                int(match.group("insertions") or 0),
+                int(match.group("deletions") or 0),
+            )
+    return None
+
+
+def diff_stat(clone_dir: Path, repo: RepoEntry) -> tuple[int, int, int] | None:
+    """Return ``(files, insertions, deletions)`` of the branch vs the base.
+
+    Uses the same 3-dot reference as :func:`diff_against_base` so the diff is
+    measured against the merge base. Returns ``None`` if ``git`` errors (e.g.
+    the branch has no commits beyond the base) or the output is unparseable —
+    the caller treats that as 'within limits' for safety.
+    """
+    base = repo.default_branch or "main"
+    ref = f"origin/{base}...HEAD"
+    try:
+        output = _run(["diff", "--stat", ref], cwd=clone_dir)
+    except GitError:
+        return None
+    return parse_diff_stat(output)
