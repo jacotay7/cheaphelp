@@ -9,6 +9,15 @@ right agent:
     cheaphelp:planned, tasks pending         -> worker     (implement)
     cheaphelp:planned, all tasks done        -> reviewer   (PR/replan)
     cheaphelp:in-review, new human feedback   -> rework    (address review, push, re-request review)
+
+Budget guardrail
+----------------
+When ``config.daily_budget_usd > 0`` the orchestrator checks the cumulative daily
+spend (tracked by :class:`~cheaphelp._internal.spend.DailySpendTracker`) before
+each stage dispatch. If the cap is exhausted, the stage is skipped and a budget-
+exceeded comment is posted on the active issue. Warnings are posted when spend
+crosses ``budget_warn_at`` (default 80%) and the hardcoded secondary threshold
+(95%). The check is a no-op when the cap is 0 (unlimited).
 """
 
 from __future__ import annotations
@@ -20,7 +29,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from cheaphelp._internal import cleanup, gitutil, opencode, planner, responder, reviewer, rework, worker
-from cheaphelp._internal.config import Config, Workspace
+from cheaphelp._internal.config import BUDGET_WARN_SECONDARY, Config, Workspace
 from cheaphelp._internal.conventions import read_conventions
 from cheaphelp._internal.env import GITHUB_TOKEN_KEY, OPENROUTER_API_KEY, load_into_environ
 from cheaphelp._internal.github import GitHubClient, Issue
@@ -28,6 +37,7 @@ from cheaphelp._internal.gitutil import ensure_clone
 from cheaphelp._internal.lock import RunLock
 from cheaphelp._internal.opencode import UsageData
 from cheaphelp._internal.registry import Registry, RepoEntry
+from cheaphelp._internal.spend import DailySpendTracker
 from cheaphelp._internal.tasks import IssueCostStore, TaskStore
 
 Logger = Callable[[str], None]
@@ -111,6 +121,8 @@ class RepoReport:
     error: str | None = None
     cost: UsageData = field(default_factory=UsageData)
     issue_costs: dict[int, dict[str, list[UsageData]]] = field(default_factory=dict)
+    budget_exhausted: bool = False
+    daily_spend: float = 0.0
 
 
 @dataclass
@@ -123,6 +135,9 @@ class TickReport:
     error: str | None = None
     skipped: bool = False
     total_cost: UsageData = field(default_factory=UsageData)
+    daily_spend: float = 0.0
+    daily_budget: float = 0.0
+    budget_exhausted: bool = False
 
     @property
     def total_turns(self) -> int:
@@ -149,21 +164,91 @@ def _record_cost(
     role: str,
     usage: UsageData | None,
     report: RepoReport,
+    tracker: DailySpendTracker | None = None,
 ) -> None:
-    """Record token/cost data from an agent turn and persist to the issue's cost store."""
+    """Record token/cost data from an agent turn and persist to the daily tracker."""
     if usage is None:
         return
     IssueCostStore(workspace.issue_dir(repo.owner, repo.name, number)).add(usage)
     report.cost = report.cost + usage
     by_issue = report.issue_costs.setdefault(number, {})
     by_issue.setdefault(role, []).append(usage)
+    if usage.cost_usd != 0.0 and tracker is not None:
+        tracker.record(usage)
+        report.daily_spend = tracker.daily_spend()
 
 
-def _run_responder(gh, workspace, config, repo, issue, comments, cwd, log, report) -> None:  # noqa: ANN001
+def _check_budget(
+    tracker: DailySpendTracker | None,
+    config: Config,
+    gh: GitHubClient | None,
+    repo: RepoEntry,
+    issue: Issue | None,
+    log: Logger,
+    report: RepoReport,
+) -> bool:
+    """Return True if the next stage may run under the daily budget.
+
+    Side effects: may post a one-time pause comment, a one-time warn
+    comment per threshold, log, and set ``report.budget_exhausted``.
+    """
+    cap = config.daily_budget_usd
+    if cap <= 0.0 or tracker is None:
+        return True
+    spend = tracker.daily_spend()
+    if spend >= cap:
+        if not report.budget_exhausted:
+            body = (
+                f"Pausing cheaphelp: today's spend ${spend:.3f} reached the configured "
+                f"daily cap of ${cap:.3f}. Work will resume tomorrow (UTC)."
+            )
+            if gh is not None and issue is not None:
+                try:
+                    gh.create_comment(
+                        repo.owner,
+                        repo.name,
+                        issue.number,
+                        responder.cheaphelp_message(body, "budget-exceeded", config),
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    log(f"  ! {repo.slug}#{issue.number}: budget comment failed: {_short_exc(exc)}")
+            log(f"  ! {repo.slug}: daily budget exhausted (${spend:.3f} >= ${cap:.3f})")
+            report.budget_exhausted = True
+        if issue is not None:
+            report.actions.append(f"#{issue.number}: budget-exceeded")
+        return False
+    # Warnings: only fire once per threshold per day.
+    for frac in (config.budget_warn_at, BUDGET_WARN_SECONDARY):
+        if frac <= 0.0 or tracker.was_warned(frac):
+            continue
+        if spend >= cap * frac:
+            tracker.mark_warned(frac)
+            pct = round(spend / cap * 100)
+            body = (
+                f"Heads up: today's spend is ${spend:.3f} ({pct}% of the daily cap of "
+                f"${cap:.3f}). Approaching the budget limit."
+            )
+            if gh is not None and issue is not None:
+                try:
+                    gh.create_comment(
+                        repo.owner,
+                        repo.name,
+                        issue.number,
+                        responder.cheaphelp_message(body, "budget-warn", config),
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    log(f"  ! {repo.slug}#{issue.number}: budget-warn comment failed: {_short_exc(exc)}")
+            log(f"  · {repo.slug}: daily spend at {pct}% of cap (${spend:.3f} / ${cap:.3f})")
+    return True
+
+
+def _run_responder(gh, workspace, config, repo, issue, comments, cwd, log, report, tracker=None) -> None:  # noqa: ANN001
+    if not _check_budget(tracker, config, gh, repo, issue, log, report):
+        return
     prompt = responder.build_prompt(issue, comments, conventions=read_conventions(cwd))
     log(f"  · {repo.slug}#{issue.number}: running responder ({config.model_for('responder')})…")
     result = opencode.run_agent(workspace, config, "responder", prompt, cwd=cwd, timeout=config.agent_timeout)
-    _record_cost(workspace, repo, issue.number, "responder", result.usage, report)
+    _record_cost(workspace, repo, issue.number, "responder", result.usage, report, tracker)
     if result.decision is None:
         log(f"  ! {repo.slug}#{issue.number}: responder produced no decision (rc={result.returncode})")
         report.actions.append(f"#{issue.number}: responder unparseable")
@@ -175,7 +260,9 @@ def _run_responder(gh, workspace, config, repo, issue, comments, cwd, log, repor
     log(f"  > {repo.slug}{msg}")
 
 
-def _run_planner(gh, workspace, config, repo, issue, cwd, log, report) -> None:  # noqa: ANN001
+def _run_planner(gh, workspace, config, repo, issue, cwd, log, report, tracker=None) -> None:  # noqa: ANN001
+    if not _check_budget(tracker, config, gh, repo, issue, log, report):
+        return
     issue_dir = workspace.issue_dir(repo.owner, repo.name, issue.number)
     spec_path = issue_dir / "issues.md"
     if not spec_path.exists():
@@ -193,7 +280,7 @@ def _run_planner(gh, workspace, config, repo, issue, cwd, log, report) -> None: 
     )
     log(f"  · {repo.slug}#{issue.number}: running planner ({config.model_for('planner')})…")
     result = opencode.run_agent(workspace, config, "planner", prompt, cwd=cwd, timeout=config.agent_timeout)
-    _record_cost(workspace, repo, issue.number, "planner", result.usage, report)
+    _record_cost(workspace, repo, issue.number, "planner", result.usage, report, tracker)
     if result.decision is None:
         log(f"  ! {repo.slug}#{issue.number}: planner produced no decision (rc={result.returncode})")
         report.actions.append(f"#{issue.number}: planner unparseable")
@@ -318,8 +405,10 @@ def _check_blast_radius(gh, workspace, config, repo, number, work_dir, log, repo
     return False
 
 
-def _run_build(gh, workspace, config, repo, issue, token, log, report) -> None:  # noqa: ANN001
+def _run_build(gh, workspace, config, repo, issue, token, log, report, tracker=None) -> None:  # noqa: ANN001
     """Worker + reviewer stage for a planned issue."""
+    if not _check_budget(tracker, config, gh, repo, issue, log, report):
+        return
     number = issue.number
     store = TaskStore(workspace.issue_dir(repo.owner, repo.name, number))
     tasks = store.load()
@@ -357,7 +446,7 @@ def _run_build(gh, workspace, config, repo, issue, token, log, report) -> None: 
             break
         log(f"  · {repo.slug}#{number}: running worker {task.id} ({config.model_for('worker')}): {task.title}…")
         res = worker.run_task(workspace, config, repo, number, task, work_dir, token=token)
-        _record_cost(workspace, repo, number, "worker", res.usage, report)
+        _record_cost(workspace, repo, number, "worker", res.usage, report, tracker)
         report.turns_taken += 1
         ran += 1
         flag = " +commit" if res.committed else ""
@@ -368,6 +457,10 @@ def _run_build(gh, workspace, config, repo, issue, token, log, report) -> None: 
         if max_tasks > 0 and ran >= max_tasks and store.next_ready() is not None:
             log(f"  · {repo.slug}#{number}: ran {ran} task(s) this tick; deferring the rest")
             report.actions.append(f"#{number}: deferred remaining tasks")
+            break
+        # Mid-tick budget check: an in-flight agent call finished; before the
+        # next worker, check whether the daily cap has been hit.
+        if store.next_ready() is not None and not _check_budget(tracker, config, gh, repo, issue, log, report):
             break
 
     tasks = store.load()
@@ -380,9 +473,13 @@ def _run_build(gh, workspace, config, repo, issue, token, log, report) -> None: 
         # with a diff-stats comment; the branch stays on the remote.
         if not _check_blast_radius(gh, workspace, config, repo, number, work_dir, log, report):
             return
+        # Budget check before the reviewer call; a prior worker may have tipped
+        # the daily spend over the cap.
+        if not _check_budget(tracker, config, gh, repo, issue, log, report):
+            return
         log(f"  > {repo.slug}#{number}: all tasks done; running reviewer")
         rr = reviewer.review_issue(gh, workspace, config, repo, number, work_dir, token=token)
-        _record_cost(workspace, repo, number, "reviewer", rr.usage, report)
+        _record_cost(workspace, repo, number, "reviewer", rr.usage, report, tracker)
         report.turns_taken += 1
         detail = rr.pr_url or rr.error or rr.decision
         log(f"  > {repo.slug}#{number}: reviewer {rr.decision} ({detail})")
@@ -401,8 +498,10 @@ def _run_build(gh, workspace, config, repo, issue, token, log, report) -> None: 
         report.actions.append(f"#{number}: blocked")
 
 
-def _run_rework(gh, workspace, config, repo, number, token, log, report) -> None:  # noqa: ANN001
+def _run_rework(gh, workspace, config, repo, number, token, log, report, tracker=None) -> None:  # noqa: ANN001
     """Rework stage: respond to unaddressed PR review feedback."""
+    if not _check_budget(tracker, config, gh, repo, None, log, report):  # issue=None — rework resolves by number
+        return
     try:
         log(f"  · {repo.slug}#{number}: running rework ({config.model_for('rework')})…")
         res = rework.run_rework(gh, workspace, config, repo, number, token=token)
@@ -433,6 +532,7 @@ def _process_repo(
     dry_run: bool,
     log: Logger,
     max_issues: int = 0,
+    tracker: DailySpendTracker | None = None,
 ) -> RepoReport:
     report = RepoReport(slug=repo.slug)
     try:
@@ -473,6 +573,11 @@ def _process_repo(
 
     if not work:
         log(f"  - {repo.slug}: nothing to do")
+        return report
+
+    # Repo-wide budget check: skip all work if the daily cap is already hit.
+    if not _check_budget(tracker, config, None, repo, None, log, report):
+        log(f"  ! {repo.slug}: skipping all issues — daily budget exhausted")
         return report
 
     if dry_run:
@@ -523,6 +628,9 @@ def _process_repo(
                 report.actions.append(f"#{issue.number}: skipped (already {current})")
                 continue
             try:
+                # Per-issue budget check before dispatching to any agent.
+                if not _check_budget(tracker, config, gh, repo, fresh_issue, log, report):
+                    break  # no further issues for this repo
                 if stage == "responder":
                     _run_responder(
                         gh,
@@ -534,13 +642,14 @@ def _process_repo(
                         cwd,
                         log,
                         report,
+                        tracker=tracker,
                     )
                 elif stage == "planner":
-                    _run_planner(gh, workspace, config, repo, fresh_issue, cwd, log, report)
+                    _run_planner(gh, workspace, config, repo, fresh_issue, cwd, log, report, tracker=tracker)
                 elif stage == "build":
-                    _run_build(gh, workspace, config, repo, fresh_issue, token, log, report)
+                    _run_build(gh, workspace, config, repo, fresh_issue, token, log, report, tracker=tracker)
                 elif stage == "rework":
-                    _run_rework(gh, workspace, config, repo, fresh_issue.number, token, log, report)
+                    _run_rework(gh, workspace, config, repo, fresh_issue.number, token, log, report, tracker=tracker)
             except Exception as exc:  # noqa: BLE001 - one issue's failure must not abort the tick
                 log(f"  ! {repo.slug}#{issue.number}: {stage} crashed: {_short_exc(exc)}")
                 report.actions.append(f"#{issue.number}: {stage} crashed")
@@ -582,6 +691,8 @@ def tick(
         report.error = "no enabled repositories registered; use `cheaphelp repo add owner/name`"
         return report
 
+    tracker = DailySpendTracker(workspace.state_dir)
+
     try:
         with GitHubClient(
             token,
@@ -601,6 +712,7 @@ def tick(
                         dry_run=dry_run,
                         log=log,
                         max_issues=max_issues,
+                        tracker=tracker,
                     ),
                 )
     except Exception as exc:  # noqa: BLE001 - top-level guard for the tick
@@ -608,5 +720,15 @@ def tick(
 
     for r in report.repos:
         report.total_cost = report.total_cost + r.cost
+
+    # Populate top-level budget fields from the tracker.
+    report.daily_spend = tracker.daily_spend()
+    report.daily_budget = config.daily_budget_usd
+    report.budget_exhausted = any(r.budget_exhausted for r in report.repos)
+    # Ensure every RepoReport has the current daily spend (in case a repo was
+    # skipped wholesale before any agent ran).
+    for r in report.repos:
+        if r.daily_spend == 0.0 and r.budget_exhausted:
+            r.daily_spend = report.daily_spend
 
     return report

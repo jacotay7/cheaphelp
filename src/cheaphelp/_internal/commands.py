@@ -97,6 +97,20 @@ def _format_cost_lines(report: object) -> list[str]:
     return lines
 
 
+def _format_budget_line(report: object) -> list[str]:
+    """One-line budget summary for the tick, or [] when unlimited/no spend."""
+    cap = float(getattr(report, "daily_budget", 0.0))
+    spend = float(getattr(report, "daily_spend", 0.0))
+    exhausted = bool(getattr(report, "budget_exhausted", False))
+    if cap <= 0.0 and not exhausted:
+        return []
+    if exhausted:
+        return [
+            f"Budget: EXHAUSTED — spent ${spend:.3f} of ${cap:.3f} daily cap. Resumes tomorrow (UTC).",
+        ]
+    return [f"Budget: ${spend:.3f} / ${cap:.3f} daily cap"]
+
+
 # --- init ------------------------------------------------------------------
 def cmd_init(args: argparse.Namespace) -> int:
     ws = _workspace(args)
@@ -339,7 +353,6 @@ def cmd_run(args: argparse.Namespace) -> int:
     config = ws.load_config()
     cli_max = getattr(args, "max_issues", 0) or 0
     effective_max = cli_max if cli_max > 0 else config.max_issues_per_tick
-
     try:
         for i in range(1, cap + 1):
             now = datetime.datetime.now(datetime.timezone.utc)
@@ -362,7 +375,11 @@ def cmd_run(args: argparse.Namespace) -> int:
 
             for cost_line in _format_cost_lines(report):
                 log(cost_line)
+            for budget_line in _format_budget_line(report):
+                log(budget_line)
 
+            if getattr(report, "budget_exhausted", False):
+                break
             if continuous and report.total_turns == 0:
                 break
 
@@ -756,6 +773,8 @@ _CONFIG_SCALAR_KEYS: dict[str, type] = {
     "poll_interval": str,
     "opencode_bin": str,
     "agent_timeout": float,
+    "daily_budget_usd": float,
+    "budget_warn_at": float,
     "max_issues_per_tick": int,
     "max_tasks_per_tick": int,
     "max_task_attempts": int,

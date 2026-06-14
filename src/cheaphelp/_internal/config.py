@@ -90,6 +90,9 @@ DEFAULT_SANDBOX: dict[str, bool] = {
     "no_network_tools": True,
 }
 
+BUDGET_WARN_SECONDARY = 0.95
+"""Hardcoded second warn threshold (fraction of cap) per the spec."""
+
 
 def default_home() -> Path:
     """Return the workspace directory, honouring `CHEAPHELP_HOME`."""
@@ -132,6 +135,11 @@ class Config:
     # Remove a per-issue build clone once its issue closes (state is kept). Each
     # tick prunes the clones of closed issues for the repos it processes.
     prune_work_clones: bool = True
+    # Cap on cumulative USD model spend per UTC day. 0.0 = unlimited (no gating).
+    daily_budget_usd: float = 0.0
+    # Fraction of the cap at which to start posting low-key warning comments
+    # (and at BUDGET_WARN_SECONDARY). 0.0 disables warnings.
+    budget_warn_at: float = 0.80
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Config:
@@ -152,6 +160,8 @@ class Config:
             retry_attempts=int(data.get("retry_attempts", 3)),
             retry_base_delay=float(data.get("retry_base_delay", 1.0)),
             prune_work_clones=bool(data.get("prune_work_clones", True)),
+            daily_budget_usd=float(data.get("daily_budget_usd", 0.0)),
+            budget_warn_at=float(data.get("budget_warn_at", 0.80)),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -172,6 +182,8 @@ class Config:
             "retry_attempts": self.retry_attempts,
             "retry_base_delay": self.retry_base_delay,
             "prune_work_clones": self.prune_work_clones,
+            "daily_budget_usd": self.daily_budget_usd,
+            "budget_warn_at": self.budget_warn_at,
         }
 
     def model_for(self, role: str) -> str:
