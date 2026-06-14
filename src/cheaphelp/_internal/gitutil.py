@@ -25,6 +25,18 @@ class GitError(RuntimeError):
     """Raised when a git command fails."""
 
 
+# Matches an embedded credential in an authenticated git URL, e.g.
+# `https://x-access-token:ghp_secret@github.com/...`. We pass such URLs as
+# command arguments to push/fetch, so without scrubbing they would leak the
+# token into error messages and logs.
+_CREDENTIAL_RE = re.compile(r"(https://)[^/@\s]+@")
+
+
+def _redact(text: str) -> str:
+    """Strip any embedded `user:token@` credential from a string for safe logging."""
+    return _CREDENTIAL_RE.sub(r"\1***@", text)
+
+
 def _run(args: list[str], *, cwd: Path | None = None) -> str:
     proc = subprocess.run(
         ["git", *args],
@@ -34,7 +46,8 @@ def _run(args: list[str], *, cwd: Path | None = None) -> str:
         check=False,
     )
     if proc.returncode != 0:
-        raise GitError(f"git {' '.join(args)} failed: {proc.stderr.strip()}")
+        detail = _redact(f"git {' '.join(args)} failed: {proc.stderr.strip()}")
+        raise GitError(detail)
     return proc.stdout.strip()
 
 

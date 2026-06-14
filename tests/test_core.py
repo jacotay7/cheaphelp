@@ -2345,6 +2345,69 @@ def test_reviewer_review_issue_forwards_conventions(
     assert result.decision == "open_pr"
 
 
+def test_apply_review_push_failure_routes_to_needs_human(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rejected push must not crash the build; it routes the issue to needs-human."""
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    repo = RepoEntry(owner="octocat", name="hello")
+    config = Config()
+
+    def boom(*_a: object, **_kw: object) -> None:
+        raise gitutil.GitError("git push ... failed: refusing to allow a Personal Access Token")
+
+    monkeypatch.setattr(gitutil, "push_branch", boom)
+
+    class _RecGH:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, tuple, dict]] = []
+
+        def __getattr__(self, name: str):
+            def rec(*args: object, **kwargs: object) -> None:
+                self.calls.append((name, args, kwargs))
+
+            return rec
+
+    gh = _RecGH()
+    result = reviewer.apply_review(
+        gh,  # ty: ignore[invalid-argument-type]
+        ws,
+        config,
+        repo,
+        1,
+        {"decision": "open_pr"},
+        tmp_path,
+        token="t",  # noqa: S106
+    )
+
+    assert result.decision == "push_failed"
+    assert result.error is not None
+    names = [c[0] for c in gh.calls]
+    # PR was never opened; the issue was labeled needs-human and dropped from planned.
+    assert "create_pull_request" not in names
+    add = next(c for c in gh.calls if c[0] == "add_labels")
+    assert config.labels["needs_human"] in add[1][-1]
+    assert "remove_label" in names
+
+
+def test_git_run_error_redacts_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failing git command must not leak the auth token in its GitError."""
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    def fake_run(*_a: object, **_k: object) -> object:
+        return SimpleNamespace(returncode=1, stdout="", stderr="remote rejected")
+
+    monkeypatch.setattr(gitutil.subprocess, "run", fake_run)
+    url = "https://x-access-token:supersecret_token@github.com/o/r.git"
+    with pytest.raises(gitutil.GitError) as excinfo:
+        gitutil._run(["push", url, "HEAD:refs/heads/b"])
+    message = str(excinfo.value)
+    assert "supersecret_token" not in message
+    assert "***@github.com" in message
+
+
 # --- cost recording ----------------------------------------------------------
 
 
