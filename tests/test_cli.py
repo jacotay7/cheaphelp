@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime
 import json
 import re
+import argparse
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
@@ -1095,7 +1096,7 @@ def test_logs_follow_exits_cleanly_on_keyboard_interrupt(
 
     monkeypatch.setattr(commands, "time", SimpleNamespace(sleep=_sleep_that_raises))
 
-    args = SimpleNamespace(home=str(ws.home), follow=True, issue=None)
+    args = argparse.Namespace(home=str(ws.home), follow=True, issue=None)
     rc = commands.cmd_logs(args)
     assert rc == 0
 
