@@ -757,7 +757,7 @@ def test_run_agent_no_reprompt_when_decision_present(
 def test_build_opencode_config_shape() -> None:
     doc = opencode.build_opencode_config(Config())
     assert doc["$schema"] == opencode.OPENCODE_SCHEMA
-    assert set(doc["agent"]) == {"responder", "planner", "worker", "reviewer"}
+    assert set(doc["agent"]) == {"responder", "planner", "worker", "reviewer", "rework"}
     # Responder is read-only; worker can write.
     assert doc["agent"]["responder"]["tools"]["edit"] is False
     assert doc["agent"]["worker"]["tools"]["edit"] is True
