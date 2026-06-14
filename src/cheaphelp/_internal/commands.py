@@ -426,3 +426,19 @@ def cmd_clean(args: argparse.Namespace) -> int:
 
 def add_config_overrides(config: Config) -> None:  # pragma: no cover - reserved
     """Placeholder for future per-invocation config overrides."""
+
+
+# --- config ------------------------------------------------------------------
+def cmd_config_show(args: argparse.Namespace) -> int:  # pragma: no cover - separate task
+    """Print the effective configuration."""
+    raise NotImplementedError("Will be implemented in a follow-up task.")
+
+
+def cmd_config_get(args: argparse.Namespace) -> int:  # pragma: no cover - separate task
+    """Look up a single config value by dotted path."""
+    raise NotImplementedError("Will be implemented in a follow-up task.")
+
+
+def cmd_config_set(args: argparse.Namespace) -> int:  # pragma: no cover - separate task
+    """Set a config value by dotted path."""
+    raise NotImplementedError("Will be implemented in a follow-up task.")
