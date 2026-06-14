@@ -3434,16 +3434,17 @@ def test_apply_decision_comment_adds_needs_human_label(tmp_path: Path) -> None:
     cfg = Config()
     iss = _issue()
     dec = {"action": "comment", "reply": "one q?"}
-    apply_decision(gh, ws, cfg, "o", "r", iss, dec)
+    apply_decision(gh, ws, cfg, "o", "r", iss, dec)  # ty: ignore[invalid-argument-type]
 
     needs_human = cfg.labels["needs_human"]
     # find the order of create_comment and add_labels(needs_human)
     ci = next(i for i, c in enumerate(gh.calls) if c[0] == "create_comment")
-    ai = next(i for i, c in enumerate(gh.calls) if c[0] == "add_labels" and needs_human in c[1][-1])
+    ai = next(i for i, c in enumerate(gh.calls) if c[0] == "add_labels" and needs_human in cast("list[str]", c[1][-1]))
     assert ci < ai, "add_labels(needs_human) should come after create_comment"
     # No ready or rejected labels were added.
     assert not any(
-        c[0] == "add_labels" and (cfg.labels["ready"] in c[1][-1] or cfg.labels["rejected"] in c[1][-1])
+        c[0] == "add_labels"
+        and (cfg.labels["ready"] in cast("list[str]", c[1][-1]) or cfg.labels["rejected"] in cast("list[str]", c[1][-1]))
         for c in gh.calls
     )
 
@@ -3475,10 +3476,12 @@ def test_apply_decision_comment_without_reply_still_adds_needs_human(tmp_path: P
     cfg = Config()
     iss = _issue()
     dec = {"action": "comment"}
-    apply_decision(gh, ws, cfg, "o", "r", iss, dec)
+    apply_decision(gh, ws, cfg, "o", "r", iss, dec)  # ty: ignore[invalid-argument-type]
 
     needs_human = cfg.labels["needs_human"]
-    assert any(c[0] == "add_labels" and needs_human in c[1][-1] for c in gh.calls), "needs_human label must be added"
+    assert any(c[0] == "add_labels" and needs_human in cast("list[str]", c[1][-1]) for c in gh.calls), (
+        "needs_human label must be added"
+    )
     # No comment posted because no reply text.
     assert not any(c[0] == "create_comment" for c in gh.calls)
 
@@ -3510,11 +3513,13 @@ def test_apply_decision_finalize_removes_needs_human_and_adds_ready(tmp_path: Pa
     cfg = Config()
     iss = _issue()
     dec = {"action": "finalize", "issue_md": "# Spec"}
-    apply_decision(gh, ws, cfg, "o", "r", iss, dec)
+    apply_decision(gh, ws, cfg, "o", "r", iss, dec)  # ty: ignore[invalid-argument-type]
 
     needs_human = cfg.labels["needs_human"]
     assert any(c[0] == "remove_label" and needs_human in c[1] for c in gh.calls), "needs_human label must be removed"
-    assert any(c[0] == "add_labels" and cfg.labels["ready"] in c[1][-1] for c in gh.calls), "ready label must be added"
+    assert any(c[0] == "add_labels" and cfg.labels["ready"] in cast("list[str]", c[1][-1]) for c in gh.calls), (
+        "ready label must be added"
+    )
     # issues.md was written
     issue_md_path = ws.issue_dir("o", "r", 1) / "issues.md"
     assert issue_md_path.exists()
@@ -3547,11 +3552,11 @@ def test_apply_decision_reject_removes_needs_human_and_adds_rejected(tmp_path: P
     cfg = Config()
     iss = _issue()
     dec = {"action": "reject"}
-    apply_decision(gh, ws, cfg, "o", "r", iss, dec)
+    apply_decision(gh, ws, cfg, "o", "r", iss, dec)  # ty: ignore[invalid-argument-type]
 
     needs_human = cfg.labels["needs_human"]
     assert any(c[0] == "remove_label" and needs_human in c[1] for c in gh.calls), "needs_human label must be removed"
-    assert any(c[0] == "add_labels" and cfg.labels["rejected"] in c[1][-1] for c in gh.calls), (
+    assert any(c[0] == "add_labels" and cfg.labels["rejected"] in cast("list[str]", c[1][-1]) for c in gh.calls), (
         "rejected label must be added"
     )
 
