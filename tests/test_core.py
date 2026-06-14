@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import random
 from collections.abc import Callable
@@ -29,7 +30,7 @@ from cheaphelp._internal.responder import (
     is_bot_comment,
     needs_turn,
 )
-from cheaphelp._internal.tasks import BLOCKED, DONE, PENDING, Task, TaskStore
+from cheaphelp._internal.tasks import BLOCKED, DONE, PENDING, IssueCostStore, Task, TaskStore
 
 
 # --- config / workspace ----------------------------------------------------
@@ -1555,6 +1556,84 @@ def test_task_store_record_attempt(tmp_path: Path) -> None:
     assert store.load()[0].attempts == 2
 
 
+# --- issue cost store -------------------------------------------------------
+def test_issue_cost_store_load_missing_file_returns_zeros(tmp_path: Path) -> None:
+    store = IssueCostStore(tmp_path / "issue-1")
+    usage = store.load()
+    assert usage.prompt_tokens == 0
+    assert usage.completion_tokens == 0
+    assert usage.total_tokens == 0
+    assert usage.cost_usd == 0.0
+
+
+def test_issue_cost_store_add_returns_cumulative_total(tmp_path: Path) -> None:
+    store = IssueCostStore(tmp_path / "issue-2")
+    u1 = opencode.UsageData(prompt_tokens=10, completion_tokens=20, total_tokens=30, cost_usd=0.001)
+    total = store.add(u1)
+    assert total.prompt_tokens == 10
+    assert total.completion_tokens == 20
+    assert total.total_tokens == 30
+    assert total.cost_usd == 0.001
+    # Verify the file was written with the right shape.
+    assert (tmp_path / "issue-2" / "cost.json").exists()
+    data = json.loads((tmp_path / "issue-2" / "cost.json").read_text(encoding="utf-8"))
+    assert data == {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30, "cost_usd": 0.001}
+
+
+def test_issue_cost_store_accumulates_across_instances(tmp_path: Path) -> None:
+    """Two add() calls across separate IssueCostStore instances simulate restart."""
+    store1 = IssueCostStore(tmp_path / "issue-3")
+    store1.add(opencode.UsageData(prompt_tokens=5, completion_tokens=5, total_tokens=10, cost_usd=0.0005))
+
+    store2 = IssueCostStore(tmp_path / "issue-3")
+    total = store2.add(opencode.UsageData(prompt_tokens=10, completion_tokens=20, total_tokens=30, cost_usd=0.001))
+    assert total.prompt_tokens == 15
+    assert total.completion_tokens == 25
+    assert total.total_tokens == 40
+    assert total.cost_usd == 0.0015
+
+    # Verify persistence: a third instance reads back the cumulative total.
+    store3 = IssueCostStore(tmp_path / "issue-3")
+    loaded = store3.load()
+    assert loaded.prompt_tokens == 15
+    assert loaded.completion_tokens == 25
+    assert loaded.total_tokens == 40
+    assert loaded.cost_usd == 0.0015
+
+
+def test_issue_cost_store_corrupt_file_treated_as_zero(tmp_path: Path) -> None:
+    path = tmp_path / "issue-4" / "cost.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("not json", encoding="utf-8")
+    store = IssueCostStore(tmp_path / "issue-4")
+    usage = store.load()
+    assert usage.prompt_tokens == 0
+    assert usage.completion_tokens == 0
+    assert usage.total_tokens == 0
+    assert usage.cost_usd == 0.0
+
+    # Non-dict JSON is also treated as zero.
+    path.write_text("[]", encoding="utf-8")
+    usage = store.load()
+    assert usage.prompt_tokens == 0
+    assert usage.completion_tokens == 0
+    assert usage.total_tokens == 0
+    assert usage.cost_usd == 0.0
+
+
+def test_issue_cost_store_save_creates_parent_dir(tmp_path: Path) -> None:
+    """save() creates the parent directory when it does not exist."""
+    store = IssueCostStore(tmp_path / "a" / "b" / "issue-5")
+    usage = opencode.UsageData(prompt_tokens=1, completion_tokens=2, total_tokens=3, cost_usd=0.0001)
+    store.save(usage)
+    assert store.path.exists()
+    loaded = store.load()
+    assert loaded.prompt_tokens == 1
+    assert loaded.completion_tokens == 2
+    assert loaded.total_tokens == 3
+    assert loaded.cost_usd == 0.0001
+
+
 def test_run_task_timeout_retries_then_escalates(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1924,10 +2003,10 @@ def test_run_build_blast_radius_prevents_reviewer(
 
     # needs-human label was added.
     add_labels_calls = [c for c in gh.calls if c[0] == "add_labels"]
-    needs_human_added = any(
-        config.labels["needs_human"] in cast("list[str]", c[1][-1]) for c in add_labels_calls
-    )
+    needs_human_added = any(config.labels["needs_human"] in cast("list[str]", c[1][-1]) for c in add_labels_calls)
     assert needs_human_added, "needs-human label should have been added"
+
+
 # --- conventions ------------------------------------------------------------
 def test_read_conventions_no_file(tmp_path: Path) -> None:
     assert read_conventions(tmp_path) == ""
