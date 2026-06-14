@@ -645,6 +645,202 @@ def test_run_no_cost_when_zero(
         assert "Cost:" not in log_contents
 
 
+# --- multi-tick run ---------------------------------------------------------
+def test_run_help_lists_new_flags_and_drops_once(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """``run -h`` shows the new flags and no longer lists ``--once``."""
+    ws = _setup_workspace(tmp_path)
+    with pytest.raises(SystemExit):
+        main(["--home", str(ws.home), "run", "-h"])
+    out = capsys.readouterr().out
+    assert "--num-ticks" in out
+    assert "--continuous" in out
+    assert "--max-ticks" in out
+    assert "--sleep" in out
+    assert "--dry-run" in out
+    assert "-n N" in out
+    assert "--once" not in out
+
+
+def test_run_rejects_removed_once_flag(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """Passing ``--once`` exits with code 2 (the flag no longer exists)."""
+    ws = _setup_workspace(tmp_path)
+    with pytest.raises(SystemExit) as exc_info:
+        main(["--home", str(ws.home), "run", "--once"])
+    assert exc_info.value.code == 2
+
+
+def test_run_num_ticks_runs_n_ticks_with_sleep(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``-n 3 --sleep 1`` runs the tick three times, sleeping between each."""
+    ws = _setup_workspace(tmp_path)
+
+    tick_count: list[int] = []
+    sleep_records: list[float] = []
+
+    def fake_tick(
+        workspace: Workspace,
+        *,
+        dry_run: bool,
+        log: Callable[[str], None],
+        max_issues: int = 0,
+    ) -> SimpleNamespace:
+        tick_count.append(len(tick_count) + 1)
+        log(f"[tick {tick_count[-1]}/3]")
+        return SimpleNamespace(error=None, total_turns=1, repos=[], total_cost=_usage_data())
+
+    def record_sleep(secs: float) -> None:
+        sleep_records.append(secs)
+
+    monkeypatch.setattr(commands, "tick", fake_tick)
+    monkeypatch.setattr(commands, "time", SimpleNamespace(sleep=record_sleep))
+
+    rc = main(["--home", str(ws.home), "run", "-n", "3", "--sleep", "1"])
+    assert rc == 0
+    assert len(tick_count) == 3, f"expected 3 ticks, got {len(tick_count)}"
+
+    # Sleep is called between ticks; 3 ticks => 2 sleeps.
+    assert len(sleep_records) == 2, f"expected 2 sleep calls, got {len(sleep_records)}"
+    for s in sleep_records:
+        assert s == 1.0, f"expected 1.0s sleep, got {s}"
+
+    captured = capsys.readouterr().out
+    assert "3 tick(s)" in captured
+    assert "[tick 1/3]" in captured
+    assert "[tick 2/3]" in captured
+    assert "[tick 3/3]" in captured
+
+    # The daily log file contains the tick headers.
+    log_path = ws.logs_dir / f"run-{datetime.datetime.now(datetime.timezone.utc).date().isoformat()}.log"
+    assert log_path.exists()
+    log_contents = log_path.read_text(encoding="utf-8")
+    assert log_contents.count("--- tick") == 3
+
+
+def test_run_continuous_stops_on_idle_tick(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``--continuous`` stops after the first tick with zero turns."""
+    ws = _setup_workspace(tmp_path)
+
+    call_order: list[int] = []
+
+    def fake_tick(
+        workspace: Workspace,
+        *,
+        dry_run: bool,
+        log: Callable[[str], None],
+        max_issues: int = 0,
+    ) -> SimpleNamespace:
+        idx = len(call_order) + 1
+        call_order.append(idx)
+        # Return work for first 2 calls, idle from 3rd onward.
+        turns = 1 if idx <= 2 else 0
+        return SimpleNamespace(error=None, total_turns=turns, repos=[], total_cost=_usage_data())
+
+    def noop_sleep(secs: float) -> None:
+        return
+
+    monkeypatch.setattr(commands, "tick", fake_tick)
+    monkeypatch.setattr(commands, "time", SimpleNamespace(sleep=noop_sleep))
+
+    rc = main(["--home", str(ws.home), "run", "--continuous", "--max-ticks", "5", "--sleep", "0.001"])
+    assert rc == 0
+    # 3 ticks: work on 1 and 2, idle on 3 (break).
+    assert len(call_order) == 3, f"expected 3 ticks, got {len(call_order)}"
+
+    captured = capsys.readouterr().out
+    assert "3 tick(s)" in captured
+
+
+def test_run_continuous_caps_at_max_ticks(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``--continuous`` with always-busy ticks stops at ``--max-ticks``."""
+    ws = _setup_workspace(tmp_path)
+
+    call_order: list[int] = []
+    sleep_records: list[float] = []
+
+    def fake_tick(
+        workspace: Workspace,
+        *,
+        dry_run: bool,
+        log: Callable[[str], None],
+        max_issues: int = 0,
+    ) -> SimpleNamespace:
+        idx = len(call_order) + 1
+        call_order.append(idx)
+        return SimpleNamespace(error=None, total_turns=1, repos=[], total_cost=_usage_data())
+
+    def record_sleep(secs: float) -> None:
+        sleep_records.append(secs)
+
+    monkeypatch.setattr(commands, "tick", fake_tick)
+    monkeypatch.setattr(commands, "time", SimpleNamespace(sleep=record_sleep))
+
+    rc = main(
+        ["--home", str(ws.home), "run", "--continuous", "--max-ticks", "4", "--sleep", "0.001"],
+    )
+    assert rc == 0
+    # Max is 4, all ticks return work -> 4 ticks.
+    assert len(call_order) == 4, f"expected 4 ticks, got {len(call_order)}"
+    # 4 ticks => 3 sleeps between them.
+    assert len(sleep_records) == 3, f"expected 3 sleep calls, got {len(sleep_records)}"
+
+
+def test_run_continuous_and_num_ticks_are_mutually_exclusive(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """Combining ``--continuous`` and ``-n`` exits with code 2."""
+    ws = _setup_workspace(tmp_path)
+    rc = main(["--home", str(ws.home), "run", "--continuous", "-n", "3"])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "--continuous" in err
+    assert "--num-ticks" in err
+
+
+def test_run_default_is_one_tick(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``cheaphelp run`` with no flags runs exactly one tick."""
+    ws = _setup_workspace(tmp_path)
+
+    tick_count: list[int] = []
+
+    def fake_tick(
+        workspace: Workspace,
+        *,
+        dry_run: bool,
+        log: Callable[[str], None],
+        max_issues: int = 0,
+    ) -> SimpleNamespace:
+        tick_count.append(len(tick_count) + 1)
+        return SimpleNamespace(error=None, total_turns=0, repos=[], total_cost=_usage_data())
+
+    monkeypatch.setattr(commands, "tick", fake_tick)
+
+    rc = main(["--home", str(ws.home), "run"])
+    assert rc == 0
+    assert len(tick_count) == 1, f"expected 1 tick, got {len(tick_count)}"
+
+
 # --- status ----------------------------------------------------------------
 # Test-only token string written into the workspace `.env` by the status
 # tests. A real `GITHUB_TOKEN` is never read or sent anywhere in tests; this
