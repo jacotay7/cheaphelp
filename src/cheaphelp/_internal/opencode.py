@@ -33,7 +33,7 @@ OPENCODE_SCHEMA = "https://opencode.ai/config.json"
 
 # Roles that are allowed to modify files. The responder is strictly read-only;
 # it converses, it does not change the codebase.
-_WRITER_ROLES = {"worker"}
+_WRITER_ROLES = {"worker", "rework"}
 
 # Mirrors what opencode expects: model ids are "openrouter/<openrouter-model-id>".
 _OPENROUTER_PREFIX = "openrouter/"

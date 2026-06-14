@@ -33,6 +33,9 @@ DEFAULT_MODELS: dict[str, str] = {
     "planner": "openrouter/minimax/minimax-m3",
     "worker": "openrouter/deepseek/deepseek-v4-flash",
     "reviewer": "openrouter/minimax/minimax-m3",
+    # Rework uses the cheap tier for the same reason as the worker — short,
+    # well-specified turns addressing individual review comments.
+    "rework": "openrouter/deepseek/deepseek-v4-flash",
 }
 
 DEFAULT_LABELS: dict[str, str] = {
@@ -69,6 +72,7 @@ DEFAULT_VARIANTS: dict[str, str] = {
     "planner": "",
     "worker": "max",
     "reviewer": "",
+    "rework": "max",
 }
 
 # Sandboxing knobs for the agents. These drive opencode's permission system

@@ -785,7 +785,7 @@ def test_status_in_review_label_shows_in_review_stage(
     captured = capsys.readouterr()
     issue_line = next(line for line in captured.out.splitlines() if "#1" in line)
     # The stage column shows the literal stage name, not a dash or the word "None".
-    assert "in-review" in issue_line
+    assert "rework" in issue_line
     # Defensive: guard against a future regression that leaks None back into the column.
     assert "None" not in issue_line
 

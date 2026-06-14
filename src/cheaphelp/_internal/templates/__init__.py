@@ -6,7 +6,7 @@ from importlib import resources
 
 # Agent roles that ship with cheaphelp. Only "responder" is wired into the
 # orchestrator today; the rest are scaffolded for future milestones.
-AGENT_ROLES = ("responder", "planner", "worker", "reviewer")
+AGENT_ROLES = ("responder", "planner", "worker", "reviewer", "rework")
 
 
 def load_prompt(role: str) -> str:
