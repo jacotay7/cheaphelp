@@ -1,7 +1,7 @@
 # cheaphelp
 
-[![ci](https://github.com/jacobataylor7/cheaphelp/workflows/ci/badge.svg)](https://github.com/jacobataylor7/cheaphelp/actions?query=workflow%3Aci)
-[![documentation](https://img.shields.io/badge/docs-zensical-FF9100.svg?style=flat)](https://jacobataylor7.github.io/cheaphelp/)
+[![ci](https://github.com/jacotay7/cheaphelp/actions/workflows/ci.yml/badge.svg)](https://github.com/jacotay7/cheaphelp/actions/workflows/ci.yml)
+[![documentation](https://img.shields.io/badge/docs-zensical-FF9100.svg?style=flat)](https://jacotay7.github.io/cheaphelp/)
 
 An AI software-engineer for your GitHub repositories. cheaphelp installs as a
 background service on your machine, watches the repos you register, and runs a
