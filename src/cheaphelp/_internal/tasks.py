@@ -144,6 +144,21 @@ class TaskStore:
         self.materialize(tasks)
         return count
 
+    def reset_all(self) -> list[Task]:
+        """Reset all tasks: set attempts to 0, flip BLOCKED -> PENDING.
+
+        Preserves ``summary``, ``depends_on``, ``files``, ``details``,
+        ``title``, and ``id`` unchanged.  Persists via ``materialize()``.
+        Returns the updated task list.
+        """
+        tasks = self.load()
+        for task in tasks:
+            task.attempts = 0
+            if task.status == BLOCKED:
+                task.status = PENDING
+        self.materialize(tasks)
+        return tasks
+
 
 class IssueCostStore:
     """Persistent cumulative token + cost counter for a single issue."""
