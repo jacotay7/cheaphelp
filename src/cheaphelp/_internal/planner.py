@@ -16,7 +16,13 @@ from cheaphelp._internal.responder import cheaphelp_message
 from cheaphelp._internal.tasks import DONE, Task, TaskStore
 
 
-def build_prompt(issue_md: str, *, replan_notes: str = "", existing_tasks: list[Task] | None = None) -> str:
+def build_prompt(
+    issue_md: str,
+    *,
+    replan_notes: str = "",
+    existing_tasks: list[Task] | None = None,
+    conventions: str = "",
+) -> str:
     """Render the planner's user message from the finalized spec.
 
     On a re-plan (`existing_tasks` with completed work), the planner is told the
@@ -47,6 +53,13 @@ def build_prompt(issue_md: str, *, replan_notes: str = "", existing_tasks: list[
             "These are finished and committed. Produce ONLY new corrective tasks that "
             "address the feedback above. Use fresh ids (e.g. `fix1`, `fix2`). Reference "
             "completed task ids in `depends_on` if needed. Do NOT recreate the work above.",
+        ]
+    if conventions.strip():
+        lines += [
+            "",
+            "## Repository conventions",
+            "",
+            conventions.rstrip(),
         ]
     lines += [
         "",

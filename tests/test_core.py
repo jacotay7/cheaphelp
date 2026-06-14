@@ -7,12 +7,14 @@ import random
 from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import patch
+from typing import cast
 
 import httpx
 import pytest
 
-from cheaphelp._internal import cleanup, gitutil, opencode, orchestrator, planner, systemd, worker
+from cheaphelp._internal import cleanup, gitutil, opencode, orchestrator, planner, responder, reviewer, systemd, worker
 from cheaphelp._internal.config import DEFAULT_AGENT_TIMEOUT, DEFAULT_MODELS, Config, Workspace
+from cheaphelp._internal.conventions import CONVENTIONS_FILES, read_conventions
 from cheaphelp._internal.env import parse_env, read_env_file, update_env_file
 from cheaphelp._internal.github import Comment, GitHubClient, GitHubError, Issue
 from cheaphelp._internal.lock import RunLock
@@ -27,7 +29,7 @@ from cheaphelp._internal.responder import (
     is_bot_comment,
     needs_turn,
 )
-from cheaphelp._internal.tasks import BLOCKED, DONE, PENDING, TaskStore
+from cheaphelp._internal.tasks import BLOCKED, DONE, PENDING, Task, TaskStore
 
 
 # --- config / workspace ----------------------------------------------------
@@ -877,6 +879,8 @@ def test_build_prompt_includes_thread() -> None:
     assert "Issue #42" in prompt
     assert "@alice" in prompt
     assert "hi" in prompt
+    # Back-compat: omitted conventions kwarg does not emit a section.
+    assert "## Repository conventions" not in prompt
 
 
 def test_attribution_header_names_agent_and_model() -> None:
@@ -908,6 +912,68 @@ def test_build_prompt_strips_attribution_header_from_thread() -> None:
     assert ATTRIBUTION_PREFIX not in prompt
     assert BOT_MARKER not in prompt
     assert "an earlier question" in prompt
+
+
+# --- conventions injection into build_prompt --------------------------------
+
+
+def test_responder_build_prompt_with_conventions() -> None:
+    prompt = build_prompt(
+        _issue(number=1),
+        [_comment("hello", "alice")],
+        "mybot",
+        conventions="house rules: no emoji",
+    )
+    assert "## Repository conventions" in prompt
+    assert "house rules: no emoji" in prompt
+
+
+def test_planner_build_prompt_with_conventions() -> None:
+    prompt = planner.build_prompt("spec body", conventions="house rules: no emoji")
+    assert "## Repository conventions" in prompt
+    assert "house rules: no emoji" in prompt
+
+
+def test_worker_build_prompt_with_conventions() -> None:
+    prompt = worker.build_prompt(
+        Task(id="t1", title="Do the thing"),
+        "spec body",
+        conventions="house rules: no emoji",
+    )
+    assert "## Repository conventions" in prompt
+    assert "house rules: no emoji" in prompt
+
+
+def test_reviewer_build_prompt_with_conventions() -> None:
+    prompt = reviewer.build_prompt(
+        "spec",
+        "M file.py",
+        "diff --git a/file.py b/file.py",
+        "### t1: done\nok",
+        conventions="house rules: no emoji",
+    )
+    assert "## Repository conventions" in prompt
+    assert "house rules: no emoji" in prompt
+
+
+def test_planner_build_prompt_no_conventions_by_default() -> None:
+    prompt = planner.build_prompt("spec body")
+    assert "## Repository conventions" not in prompt
+
+
+def test_worker_build_prompt_no_conventions_by_default() -> None:
+    prompt = worker.build_prompt(Task(id="t1", title="x"), "spec")
+    assert "## Repository conventions" not in prompt
+
+
+def test_reviewer_build_prompt_no_conventions_by_default() -> None:
+    prompt = reviewer.build_prompt("spec", "M f.py", "diff", "summary")
+    assert "## Repository conventions" not in prompt
+
+
+def test_build_prompt_conventions_whitespace_only() -> None:
+    prompt = build_prompt(_issue(), [], "bot", conventions="   ")
+    assert "## Repository conventions" not in prompt
 
 
 # --- opencode --------------------------------------------------------------
@@ -1467,3 +1533,577 @@ def test_run_lock_releases_on_exit(tmp_path: Path) -> None:
 def test_run_lock_holder_pid(tmp_path: Path) -> None:
     with RunLock(tmp_path / "x.lock") as lock:
         assert lock.holder_pid == os.getpid()
+
+
+# --- parse_diff_stat -------------------------------------------------------
+def test_parse_diff_stat_plural_full() -> None:
+    """Full stat line with multiple files, insertions and deletions."""
+    result = gitutil.parse_diff_stat(
+        " src/foo.py | 4 ++--\n src/bar.py | 2 +\n 2 files changed, 3 insertions(+), 3 deletions(-)",
+    )
+    assert result == (2, 3, 3)
+
+
+def test_parse_diff_stat_singular_no_deletions() -> None:
+    """Singular forms: 1 file, 1 insertion, no deletions."""
+    result = gitutil.parse_diff_stat(" 1 file changed, 1 insertion(+)")
+    assert result == (1, 1, 0)
+
+
+def test_parse_diff_stat_singular_full() -> None:
+    """Singular forms: 1 file, 1 insertion, 1 deletion."""
+    result = gitutil.parse_diff_stat(" 1 file changed, 1 insertion(+), 1 deletion(-)")
+    assert result == (1, 1, 1)
+
+
+def test_parse_diff_stat_no_insertions() -> None:
+    """Only deletions present (no insertions segment)."""
+    result = gitutil.parse_diff_stat(" 3 files changed, 45 deletions(-)")
+    assert result == (3, 0, 45)
+
+
+def test_parse_diff_stat_empty() -> None:
+    """Empty string returns None."""
+    result = gitutil.parse_diff_stat("")
+    assert result is None
+
+
+def test_parse_diff_stat_garbage() -> None:
+    """Unrecognisable prose returns None."""
+    result = gitutil.parse_diff_stat("some prose, not a stat line")
+    assert result is None
+
+
+def test_parse_diff_stat_no_summary_line() -> None:
+    """File-level diff lines with no summary line return None."""
+    result = gitutil.parse_diff_stat(" src/foo.py | 4 ++--")
+    assert result is None
+
+
+# --- blast-radius guardrail ------------------------------------------------
+class _RecBuildGH:
+    """GitHub stand-in that records every label/comment call made during build."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, tuple[object, ...]]] = []
+
+    def ensure_label(self, *a: object, **_kwargs: object) -> None:
+        self.calls.append(("ensure_label", a))
+
+    def add_labels(self, *a: object, **_kwargs: object) -> None:
+        self.calls.append(("add_labels", a))
+
+    def remove_label(self, *a: object, **_kwargs: object) -> None:
+        self.calls.append(("remove_label", a))
+
+    def create_comment(self, *a: object, **_kwargs: object) -> None:
+        self.calls.append(("create_comment", a))
+
+
+def _blast_gh() -> _RecBuildGH:
+    """Return a fresh _RecBuildGH and a default config/repo for blast-radius tests."""
+    return _RecBuildGH()
+
+
+def test_check_blast_radius_within_limits_returns_true(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gh = _blast_gh()
+    repo = RepoEntry(owner="o", name="r")
+    monkeypatch.setattr(gitutil, "diff_stat", lambda _w, _r: (5, 10, 5))
+    report = orchestrator.RepoReport(slug=repo.slug)
+    result = orchestrator._check_blast_radius(gh, None, Config(), repo, 1, None, lambda _m: None, report)
+    assert result is True
+    assert gh.calls == []
+
+
+def test_check_blast_radius_files_exceeded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gh = _blast_gh()
+    repo = RepoEntry(owner="o", name="r")
+    config = Config()
+    monkeypatch.setattr(gitutil, "diff_stat", lambda _w, _r: (45, 10, 5))
+    report = orchestrator.RepoReport(slug=repo.slug)
+    result = orchestrator._check_blast_radius(gh, None, config, repo, 1, None, lambda _m: None, report)
+    assert result is False
+
+    # needs-human label was added.
+    add_labels_call = next(c for c in gh.calls if c[0] == "add_labels")
+    assert config.labels["needs_human"] in add_labels_call[1][-1]  # ty: ignore[unsupported-operator]
+
+    # in-progress was removed.
+    remove_label_call = next(c for c in gh.calls if c[0] == "remove_label")
+    assert config.labels["in_progress"] in remove_label_call[1]
+
+    # Comment body contains "45" and "blast-radius".
+    comment_call = next(c for c in gh.calls if c[0] == "create_comment")
+    body = comment_call[1][-1]
+    assert "45" in body  # ty: ignore[unsupported-operator]
+    assert "blast-radius" in body  # ty: ignore[unsupported-operator]
+
+
+def test_check_blast_radius_lines_exceeded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gh = _blast_gh()
+    repo = RepoEntry(owner="o", name="r")
+    config = Config()
+    monkeypatch.setattr(gitutil, "diff_stat", lambda _w, _r: (5, 800, 800))
+    report = orchestrator.RepoReport(slug=repo.slug)
+    result = orchestrator._check_blast_radius(gh, None, config, repo, 1, None, lambda _m: None, report)
+    assert result is False
+
+    comment_call = next(c for c in gh.calls if c[0] == "create_comment")
+    body = comment_call[1][-1]
+    # The body lists individual insertions and deletions (not the sum).
+    assert "Lines added: 800" in body  # ty: ignore[unsupported-operator]
+    assert "Lines removed: 800" in body  # ty: ignore[unsupported-operator]
+    add_labels_call = next(c for c in gh.calls if c[0] == "add_labels")
+    assert config.labels["needs_human"] in add_labels_call[1][-1]  # ty: ignore[unsupported-operator]
+
+
+def test_check_blast_radius_unlimited_when_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gh = _blast_gh()
+    repo = RepoEntry(owner="o", name="r", max_diff_files=0, max_diff_lines=0)
+    monkeypatch.setattr(gitutil, "diff_stat", lambda _w, _r: (999, 9999, 9999))
+    report = orchestrator.RepoReport(slug=repo.slug)
+    result = orchestrator._check_blast_radius(gh, None, Config(), repo, 1, None, lambda _m: None, report)
+    assert result is True
+    assert gh.calls == []
+
+
+def test_check_blast_radius_unparseable_safe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gh = _blast_gh()
+    repo = RepoEntry(owner="o", name="r")
+    monkeypatch.setattr(gitutil, "diff_stat", lambda _w, _r: None)
+    report = orchestrator.RepoReport(slug=repo.slug)
+    result = orchestrator._check_blast_radius(gh, None, Config(), repo, 1, None, lambda _m: None, report)
+    assert result is True
+    assert gh.calls == []
+
+
+def test_check_blast_radius_no_branch_push_required(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gh = _blast_gh()
+    repo = RepoEntry(owner="o", name="r")
+
+    def raise_if_called(*_a: object, **_kw: object) -> None:
+        raise AssertionError("push_branch should not be called")
+
+    monkeypatch.setattr(gitutil, "push_branch", raise_if_called)
+    monkeypatch.setattr(gitutil, "diff_stat", lambda _w, _r: (45, 10, 5))
+    # This must not raise — proving push_branch was never invoked.
+    report = orchestrator.RepoReport(slug=repo.slug)
+    result = orchestrator._check_blast_radius(
+        gh,
+        None,
+        Config(),
+        repo,
+        1,
+        None,
+        lambda _m: None,
+        report,
+    )
+    assert result is False
+
+
+def test_run_build_blast_radius_prevents_reviewer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When blast radius triggers, the reviewer is never called."""
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    repo = RepoEntry(owner="octocat", name="hello")
+    issue = Issue(number=1, title="t", body="b", state="open", labels=[], user="u", html_url="")
+    issue_dir = ws.issue_dir(repo.owner, repo.name, issue.number)
+    store = TaskStore(issue_dir)
+    _, tasks = planner.parse_manifest({"tasks": [{"id": "t1", "title": "one"}]})
+    store.materialize(tasks)
+
+    monkeypatch.setattr(gitutil, "ensure_work_clone", lambda *_a, **_k: None)
+
+    def fake_run_task(_ws, _cfg, _repo, number, task, _work_dir, *, token):  # noqa: ANN001, ANN202
+        TaskStore(ws.issue_dir(repo.owner, repo.name, number)).set_status(task.id, DONE, summary="ok")
+        return worker.WorkResult(task_id=task.id, status=DONE, committed=True)
+
+    monkeypatch.setattr(worker, "run_task", fake_run_task)
+
+    # Stub diff_stat to trigger the blast radius.
+    monkeypatch.setattr(gitutil, "diff_stat", lambda _w, _r: (45, 10, 5))
+
+    reviewer_called: list[str] = []
+
+    def fake_review_issue(*_a: object, **_kw: object) -> object:
+        reviewer_called.append("called")
+        from cheaphelp._internal.reviewer import ReviewResult  # noqa: PLC0415
+
+        return ReviewResult(number=1, decision="open-pr")
+
+    monkeypatch.setattr(reviewer, "review_issue", fake_review_issue)
+
+    gh = _RecBuildGH()
+    report = orchestrator.RepoReport(slug=repo.slug)
+    config = Config()
+    orchestrator._run_build(
+        gh,
+        ws,
+        config,
+        repo,
+        issue,
+        "token",
+        lambda _m: None,
+        report,
+    )
+
+    # The reviewer must not have been called.
+    assert reviewer_called == [], "reviewer was called despite blast-radius trigger"
+
+    # needs-human label was added.
+    add_labels_calls = [c for c in gh.calls if c[0] == "add_labels"]
+    needs_human_added = any(
+        config.labels["needs_human"] in cast("list[str]", c[1][-1]) for c in add_labels_calls
+    )
+    assert needs_human_added, "needs-human label should have been added"
+# --- conventions ------------------------------------------------------------
+def test_read_conventions_no_file(tmp_path: Path) -> None:
+    assert read_conventions(tmp_path) == ""
+
+
+def test_read_conventions_cheaphelp_md(tmp_path: Path) -> None:
+    d = tmp_path
+    (d / "CHEAPHELP.md").write_text("hello", encoding="utf-8")
+    assert read_conventions(d) == "hello"
+
+
+def test_read_conventions_agents_md(tmp_path: Path) -> None:
+    d = tmp_path
+    (d / "AGENTS.md").write_text("world", encoding="utf-8")
+    assert read_conventions(d) == "world"
+
+
+def test_read_conventions_contributing_md(tmp_path: Path) -> None:
+    d = tmp_path
+    (d / "CONTRIBUTING.md").write_text("contrib", encoding="utf-8")
+    assert read_conventions(d) == "contrib"
+
+
+def test_read_conventions_precedence_cheaphelp_wins(tmp_path: Path) -> None:
+    d = tmp_path
+    (d / "CHEAPHELP.md").write_text("ch", encoding="utf-8")
+    (d / "AGENTS.md").write_text("ag", encoding="utf-8")
+    (d / "CONTRIBUTING.md").write_text("ct", encoding="utf-8")
+    assert read_conventions(d) == "ch"
+
+
+def test_read_conventions_precedence_agents_when_no_cheaphelp(tmp_path: Path) -> None:
+    d = tmp_path
+    (d / "AGENTS.md").write_text("ag", encoding="utf-8")
+    (d / "CONTRIBUTING.md").write_text("ct", encoding="utf-8")
+    assert read_conventions(d) == "ag"
+
+
+def test_read_conventions_missing_dir(tmp_path: Path) -> None:
+    assert read_conventions(tmp_path / "nope") == ""
+
+
+def test_read_conventions_not_a_dir(tmp_path: Path) -> None:
+    f = tmp_path / "file"
+    f.write_text("x", encoding="utf-8")
+    assert read_conventions(f) == ""
+
+
+def test_read_conventions_empty_file(tmp_path: Path) -> None:
+    d = tmp_path
+    (d / "CHEAPHELP.md").write_text("", encoding="utf-8")
+    assert read_conventions(d) == ""
+
+
+def test_conventions_files_constant() -> None:
+    assert CONVENTIONS_FILES == ("CHEAPHELP.md", "AGENTS.md", "CONTRIBUTING.md")
+
+
+# --- conventions wiring integration tests -----------------------------------
+
+
+def test_run_responder_forwards_conventions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_run_responder reads CHEAPHELP.md from clone dir and passes it to build_prompt."""
+    clone_dir = tmp_path / "clone"
+    clone_dir.mkdir()
+    (clone_dir / "CHEAPHELP.md").write_text("SENTINEL_HOUSE_RULES", encoding="utf-8")
+    monkeypatch.setenv("CHEAPHELP_AGENT_MOCK", "/dev/null")
+
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    ws.save_config(Config())
+    repo = RepoEntry(owner="octocat", name="hello")
+
+    captured: list[str] = []
+
+    def recording_build_prompt(
+        issue: object,
+        comments: object,
+        bot_login: object,
+        *,
+        conventions: str = "",
+    ) -> str:
+        captured.append(conventions)
+        return ""
+
+    monkeypatch.setattr(responder, "build_prompt", recording_build_prompt)
+
+    fake_gh = _RecordingResponderGH()
+    report = orchestrator.RepoReport(slug=repo.slug)
+
+    orchestrator._run_responder(
+        fake_gh,
+        ws,
+        Config(),
+        repo,
+        fake_gh._issue(),
+        [],
+        "mybot",
+        clone_dir,
+        lambda _m: None,
+        report,
+    )
+
+    assert captured == ["SENTINEL_HOUSE_RULES"]
+
+
+def test_run_planner_forwards_conventions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_run_planner reads CHEAPHELP.md from clone dir and passes it to build_prompt."""
+    clone_dir = tmp_path / "clone"
+    clone_dir.mkdir()
+    (clone_dir / "CHEAPHELP.md").write_text("SENTINEL_HOUSE_RULES", encoding="utf-8")
+    monkeypatch.setenv("CHEAPHELP_AGENT_MOCK", "/dev/null")
+
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    ws.save_config(Config())
+    repo = RepoEntry(owner="octocat", name="hello")
+    issue = _issue(number=1)
+
+    # Planner needs issues.md in the issue dir.
+    issue_dir = ws.issue_dir(repo.owner, repo.name, issue.number)
+    issue_dir.mkdir(parents=True, exist_ok=True)
+    (issue_dir / "issues.md").write_text("# The spec", encoding="utf-8")
+
+    captured: list[str] = []
+
+    def recording_build_prompt(
+        issue_md: str,
+        *,
+        replan_notes: str = "",
+        existing_tasks: object = None,
+        conventions: str = "",
+    ) -> str:
+        captured.append(conventions)
+        return ""
+
+    monkeypatch.setattr(planner, "build_prompt", recording_build_prompt)
+
+    fake_gh = _RecordingResponderGH()
+    report = orchestrator.RepoReport(slug=repo.slug)
+
+    orchestrator._run_planner(
+        fake_gh,
+        ws,
+        Config(),
+        repo,
+        issue,
+        clone_dir,
+        lambda _m: None,
+        report,
+    )
+
+    assert captured == ["SENTINEL_HOUSE_RULES"]
+
+
+def test_run_responder_no_conventions_when_file_absent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_run_responder passes empty string when no conventions file exists."""
+    clone_dir = tmp_path / "clone"
+    clone_dir.mkdir()
+    monkeypatch.setenv("CHEAPHELP_AGENT_MOCK", "/dev/null")
+
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    ws.save_config(Config())
+    repo = RepoEntry(owner="octocat", name="hello")
+
+    captured: list[str] = []
+
+    def recording_build_prompt(
+        issue: object,
+        comments: object,
+        bot_login: object,
+        *,
+        conventions: str = "",
+    ) -> str:
+        captured.append(conventions)
+        return ""
+
+    monkeypatch.setattr(responder, "build_prompt", recording_build_prompt)
+
+    fake_gh = _RecordingResponderGH()
+    report = orchestrator.RepoReport(slug=repo.slug)
+
+    orchestrator._run_responder(
+        fake_gh,
+        ws,
+        Config(),
+        repo,
+        fake_gh._issue(),
+        [],
+        "mybot",
+        clone_dir,
+        lambda _m: None,
+        report,
+    )
+
+    assert captured == [""]
+
+
+def test_worker_run_task_forwards_conventions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """worker.run_task reads AGENTS.md from clone dir and passes it to build_prompt."""
+    clone_dir = tmp_path / "clone"
+    clone_dir.mkdir()
+    (clone_dir / "AGENTS.md").write_text("SENTINEL_AGENT_RULES", encoding="utf-8")
+
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    ws.save_config(Config())
+    repo = RepoEntry(owner="octocat", name="hello")
+    issue_number = 1
+
+    # Set up task store with a task.
+    issue_dir = ws.issue_dir(repo.owner, repo.name, issue_number)
+    store = TaskStore(issue_dir)
+    _, tasks = planner.parse_manifest({"tasks": [{"id": "t1", "title": "Do something"}]})
+    store.materialize(tasks)
+
+    # Mock git + opencode so the function doesn't actually run anything.
+    monkeypatch.setattr(gitutil, "commit_all", lambda *a, **kw: True)
+    monkeypatch.setattr(gitutil, "push_branch", lambda *a, **kw: None)
+
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        opencode,
+        "run_agent",
+        lambda *a, **kw: SimpleNamespace(decision={"status": "done", "summary": "ok"}),
+    )
+
+    captured: list[str] = []
+
+    def recording_build_prompt(
+        task: object,
+        issue_md: str,
+        *,
+        conventions: str = "",
+    ) -> str:
+        captured.append(conventions)
+        return "recording"
+
+    monkeypatch.setattr(worker, "build_prompt", recording_build_prompt)
+
+    result = worker.run_task(ws, Config(), repo, issue_number, store.load()[0], clone_dir, token=None)
+
+    assert captured == ["SENTINEL_AGENT_RULES"]
+    assert result.status == "done"
+
+
+def test_reviewer_review_issue_forwards_conventions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """reviewer.review_issue reads AGENTS.md from clone dir and passes it to build_prompt."""
+    clone_dir = tmp_path / "clone"
+    clone_dir.mkdir()
+    (clone_dir / "AGENTS.md").write_text("SENTINEL_AGENT_RULES", encoding="utf-8")
+
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    ws.save_config(Config())
+    repo = RepoEntry(owner="octocat", name="hello")
+    issue_number = 1
+
+    # Set up issue dir with issues.md and a task store with a done task.
+    issue_dir = ws.issue_dir(repo.owner, repo.name, issue_number)
+    issue_dir.mkdir(parents=True, exist_ok=True)
+    (issue_dir / "issues.md").write_text("# Spec", encoding="utf-8")
+    store = TaskStore(issue_dir)
+    _, tasks = planner.parse_manifest({"tasks": [{"id": "t1", "title": "Do it"}]})
+    store.materialize(tasks)
+    store.set_status("t1", DONE, summary="done it")
+
+    # Mock git + opencode.
+    monkeypatch.setattr(gitutil, "diff_against_base", lambda *a, **kw: ("M f.py", "diff --git a/f.py b/f.py"))
+    monkeypatch.setattr(gitutil, "push_branch", lambda *a, **kw: None)
+
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        opencode,
+        "run_agent",
+        lambda *a, **kw: SimpleNamespace(decision={"decision": "open_pr", "pr_title": "x", "pr_body": "y"}),
+    )
+
+    captured: list[str] = []
+
+    def recording_build_prompt(
+        issue_md: str,
+        name_status: str,
+        full_diff: str,
+        summaries: str,
+        *,
+        conventions: str = "",
+    ) -> str:
+        captured.append(conventions)
+        return "recording"
+
+    monkeypatch.setattr(reviewer, "build_prompt", recording_build_prompt)
+
+    # Need a fake GH that supports create_pull_request etc.
+    class _FakeReviewGH:
+        def create_pull_request(self, *_args: object, **_kwargs: object) -> dict:
+            return {"number": 99, "html_url": "https://pr"}
+
+        def request_reviewers(self, *_args: object, **_kwargs: object) -> None: ...
+        def ensure_label(self, *_args: object, **_kwargs: object) -> None: ...
+        def add_labels(self, *_args: object, **_kwargs: object) -> None: ...
+        def remove_label(self, *_args: object, **_kwargs: object) -> None: ...
+        def create_comment(self, *_args: object, **_kwargs: object) -> None: ...
+        def authenticated_login(self) -> str:
+            return "mybot"
+
+    result = reviewer.review_issue(
+        _FakeReviewGH(),  # ty: ignore[invalid-argument-type]
+        ws,
+        Config(),
+        repo,
+        issue_number,
+        clone_dir,
+        token=None,
+    )
+
+    assert captured == ["SENTINEL_AGENT_RULES"]
+    assert result.decision == "open_pr"

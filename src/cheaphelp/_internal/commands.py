@@ -12,6 +12,7 @@ import getpass
 import json
 import os
 import sys
+import time
 from dataclasses import asdict
 from pathlib import Path
 
@@ -27,6 +28,8 @@ from cheaphelp._internal.env import (
 from cheaphelp._internal.github import GitHubClient, GitHubError
 from cheaphelp._internal.orchestrator import classify, tick
 from cheaphelp._internal.registry import Registry, RepoEntry, parse_slug
+
+_LOG_TAIL_LINES = 50
 
 
 def _workspace(args: argparse.Namespace) -> Workspace:
@@ -123,6 +126,8 @@ def cmd_repo_add(args: argparse.Namespace) -> int:
         print("Warning: no GITHUB_TOKEN set; adding without verification.", file=sys.stderr)
 
     registry = Registry(ws.registry_path)
+    mdf = getattr(args, "max_diff_files", None)
+    mdl = getattr(args, "max_diff_lines", None)
     added = registry.add(
         RepoEntry(
             owner=owner,
@@ -130,6 +135,8 @@ def cmd_repo_add(args: argparse.Namespace) -> int:
             default_branch=default_branch,
             autofix=getattr(args, "autofix", "") or "",
             checks=getattr(args, "checks", "") or "",
+            max_diff_files=30 if mdf is None else mdf,
+            max_diff_lines=1000 if mdl is None else mdl,
         ),
     )
     if not added:
@@ -197,11 +204,15 @@ def cmd_repo_set(args: argparse.Namespace) -> int:
         print(str(exc), file=sys.stderr)
         return 2
 
-    updates: dict[str, str] = {}
+    updates: dict[str, str | int] = {}
     if getattr(args, "checks", None) is not None:
         updates["checks"] = args.checks
     if getattr(args, "autofix", None) is not None:
         updates["autofix"] = args.autofix
+    if getattr(args, "max_diff_files", None) is not None:
+        updates["max_diff_files"] = args.max_diff_files
+    if getattr(args, "max_diff_lines", None) is not None:
+        updates["max_diff_lines"] = args.max_diff_lines
 
     if not updates:
         print(f"Nothing to update for {owner}/{name}.")
@@ -422,6 +433,66 @@ def cmd_clean(args: argparse.Namespace) -> int:
     verb = "Would remove" if dry_run else "Removed"
     print(f"{verb} {total} clone(s).")
     return 0
+
+
+# --- logs ------------------------------------------------------------------
+def cmd_logs(args: argparse.Namespace) -> int:
+    """Display tick activity from the run log for today.
+
+    Resolves the workspace via ``_workspace(args)`` and gates on
+    ``_require_workspace``.  Reads the daily log file, optionally filters by
+    issue number (``#<n>``), and can stream new lines as they are appended.
+
+    Parameters:
+        args: Parsed command-line namespace.  Expected attributes:
+            ``home`` (optional), ``issue`` (int or None), ``follow`` (bool).
+
+    Returns:
+        Exit code (0 on success).
+    """
+    ws = _workspace(args)
+    if (rc := _require_workspace(ws)) is not None:
+        return rc
+
+    log_path = ws.logs_dir / f"run-{datetime.datetime.now(datetime.timezone.utc).date().isoformat()}.log"
+    issue: int | None = getattr(args, "issue", None)
+    follow: bool = bool(getattr(args, "follow", False))
+
+    if not log_path.exists():
+        print(f"(no log for today; expected {log_path.name})", file=sys.stderr)
+        return 0
+
+    if not follow:
+        try:
+            text = log_path.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            print(f"Failed to read log: {exc}", file=sys.stderr)
+            return 1
+        lines = text.splitlines()
+        tail = lines[-_LOG_TAIL_LINES:] if len(lines) > _LOG_TAIL_LINES else lines
+        for line in tail:
+            if issue is None or f"#{issue}" in line:
+                print(line)
+        return 0
+
+    # --follow path: tail -f semantics, only new appends.
+    try:
+        with log_path.open("r", encoding="utf-8", errors="replace") as f:
+            f.seek(0, os.SEEK_END)
+            while True:
+                try:
+                    chunk = f.read()
+                    if chunk:
+                        for line in chunk.splitlines():
+                            if issue is None or f"#{issue}" in line:
+                                print(line)
+                        sys.stdout.flush()
+                    time.sleep(0.5)
+                except KeyboardInterrupt:
+                    return 0
+    except OSError as exc:
+        print(f"Failed to follow log: {exc}", file=sys.stderr)
+        return 1
 
 
 def add_config_overrides(config: Config) -> None:  # pragma: no cover - reserved
