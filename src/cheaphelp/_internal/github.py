@@ -23,6 +23,8 @@ USER_AGENT = "cheaphelp"
 
 _HTTP_NO_CONTENT = 204
 _HTTP_ERROR = 400
+_HTTP_RATE_LIMITED = 429
+_HTTP_SERVER_ERROR = 500
 _PER_PAGE = 100
 
 
@@ -125,7 +127,7 @@ class GitHubClient:
     def _backoff_delay(self, attempt: int) -> float:
         """Return the backoff for `attempt` (1-indexed) with ±25% jitter."""
         base = self._retry_base_delay * (2 ** (attempt - 1))
-        jitter = base * 0.25 * (2 * random.random() - 1)
+        jitter = base * 0.25 * (2 * random.random() - 1)  # noqa: S311  # jitter for backoff, not crypto
         return max(0.0, base + jitter)
 
     @staticmethod
@@ -172,11 +174,13 @@ class GitHubClient:
                 time.sleep(delay)
                 continue
 
-            if response.status_code == 429 or response.status_code >= 500:
+            if response.status_code == _HTTP_RATE_LIMITED or response.status_code >= _HTTP_SERVER_ERROR:
                 if attempt >= self._retry_attempts:
                     raise self._error_for(method, path, response)
                 retry_after = (
-                    self._parse_retry_after(response.headers.get("Retry-After")) if response.status_code == 429 else 0.0
+                    self._parse_retry_after(response.headers.get("Retry-After"))
+                    if response.status_code == _HTTP_RATE_LIMITED
+                    else 0.0
                 )
                 delay = max(self._backoff_delay(attempt), retry_after)
                 _LOG.warning(
