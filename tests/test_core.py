@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from cheaphelp._internal import cleanup, gitutil, opencode, orchestrator, planner, systemd, worker
+from cheaphelp._internal import cleanup, gitutil, opencode, orchestrator, planner, reviewer, systemd, worker
 from cheaphelp._internal.config import DEFAULT_AGENT_TIMEOUT, DEFAULT_MODELS, Config, Workspace
 from cheaphelp._internal.env import parse_env, read_env_file, update_env_file
 from cheaphelp._internal.github import Comment, Issue
@@ -1059,3 +1059,239 @@ def test_run_lock_releases_on_exit(tmp_path: Path) -> None:
 def test_run_lock_holder_pid(tmp_path: Path) -> None:
     with RunLock(tmp_path / "x.lock") as lock:
         assert lock.holder_pid == os.getpid()
+
+
+# --- parse_diff_stat -------------------------------------------------------
+def test_parse_diff_stat_plural_full() -> None:
+    """Full stat line with multiple files, insertions and deletions."""
+    result = gitutil.parse_diff_stat(
+        " src/foo.py | 4 ++--\n src/bar.py | 2 +\n 2 files changed, 3 insertions(+), 3 deletions(-)",
+    )
+    assert result == (2, 3, 3)
+
+
+def test_parse_diff_stat_singular_no_deletions() -> None:
+    """Singular forms: 1 file, 1 insertion, no deletions."""
+    result = gitutil.parse_diff_stat(" 1 file changed, 1 insertion(+)")
+    assert result == (1, 1, 0)
+
+
+def test_parse_diff_stat_singular_full() -> None:
+    """Singular forms: 1 file, 1 insertion, 1 deletion."""
+    result = gitutil.parse_diff_stat(" 1 file changed, 1 insertion(+), 1 deletion(-)")
+    assert result == (1, 1, 1)
+
+
+def test_parse_diff_stat_no_insertions() -> None:
+    """Only deletions present (no insertions segment)."""
+    result = gitutil.parse_diff_stat(" 3 files changed, 45 deletions(-)")
+    assert result == (3, 0, 45)
+
+
+def test_parse_diff_stat_empty() -> None:
+    """Empty string returns None."""
+    result = gitutil.parse_diff_stat("")
+    assert result is None
+
+
+def test_parse_diff_stat_garbage() -> None:
+    """Unrecognisable prose returns None."""
+    result = gitutil.parse_diff_stat("some prose, not a stat line")
+    assert result is None
+
+
+def test_parse_diff_stat_no_summary_line() -> None:
+    """File-level diff lines with no summary line return None."""
+    result = gitutil.parse_diff_stat(" src/foo.py | 4 ++--")
+    assert result is None
+
+
+# --- blast-radius guardrail ------------------------------------------------
+class _RecBuildGH:
+    """GitHub stand-in that records every label/comment call made during build."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, tuple[object, ...]]] = []
+
+    def ensure_label(self, *a: object, **_kwargs: object) -> None:
+        self.calls.append(("ensure_label", a))
+
+    def add_labels(self, *a: object, **_kwargs: object) -> None:
+        self.calls.append(("add_labels", a))
+
+    def remove_label(self, *a: object, **_kwargs: object) -> None:
+        self.calls.append(("remove_label", a))
+
+    def create_comment(self, *a: object, **_kwargs: object) -> None:
+        self.calls.append(("create_comment", a))
+
+
+def _blast_gh() -> _RecBuildGH:
+    """Return a fresh _RecBuildGH and a default config/repo for blast-radius tests."""
+    return _RecBuildGH()
+
+
+def test_check_blast_radius_within_limits_returns_true(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gh = _blast_gh()
+    repo = RepoEntry(owner="o", name="r")
+    monkeypatch.setattr(gitutil, "diff_stat", lambda _w, _r: (5, 10, 5))
+    report = orchestrator.RepoReport(slug=repo.slug)
+    result = orchestrator._check_blast_radius(gh, None, Config(), repo, 1, None, lambda _m: None, report)
+    assert result is True
+    assert gh.calls == []
+
+
+def test_check_blast_radius_files_exceeded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gh = _blast_gh()
+    repo = RepoEntry(owner="o", name="r")
+    config = Config()
+    monkeypatch.setattr(gitutil, "diff_stat", lambda _w, _r: (45, 10, 5))
+    report = orchestrator.RepoReport(slug=repo.slug)
+    result = orchestrator._check_blast_radius(gh, None, config, repo, 1, None, lambda _m: None, report)
+    assert result is False
+
+    # needs-human label was added.
+    add_labels_call = next(c for c in gh.calls if c[0] == "add_labels")
+    assert config.labels["needs_human"] in add_labels_call[1][-1]  # ty: ignore[unsupported-operator]
+
+    # in-progress was removed.
+    remove_label_call = next(c for c in gh.calls if c[0] == "remove_label")
+    assert config.labels["in_progress"] in remove_label_call[1]  # ty: ignore[unsupported-operator]
+
+    # Comment body contains "45" and "blast-radius".
+    comment_call = next(c for c in gh.calls if c[0] == "create_comment")
+    body = comment_call[1][-1]
+    assert "45" in body  # ty: ignore[unsupported-operator]
+    assert "blast-radius" in body  # ty: ignore[unsupported-operator]
+
+
+def test_check_blast_radius_lines_exceeded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gh = _blast_gh()
+    repo = RepoEntry(owner="o", name="r")
+    config = Config()
+    monkeypatch.setattr(gitutil, "diff_stat", lambda _w, _r: (5, 800, 800))
+    report = orchestrator.RepoReport(slug=repo.slug)
+    result = orchestrator._check_blast_radius(gh, None, config, repo, 1, None, lambda _m: None, report)
+    assert result is False
+
+    comment_call = next(c for c in gh.calls if c[0] == "create_comment")
+    body = comment_call[1][-1]
+    # The body lists individual insertions and deletions (not the sum).
+    assert "Lines added: 800" in body  # ty: ignore[unsupported-operator]
+    assert "Lines removed: 800" in body  # ty: ignore[unsupported-operator]
+    add_labels_call = next(c for c in gh.calls if c[0] == "add_labels")
+    assert config.labels["needs_human"] in add_labels_call[1][-1]  # ty: ignore[unsupported-operator]
+
+
+def test_check_blast_radius_unlimited_when_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gh = _blast_gh()
+    repo = RepoEntry(owner="o", name="r", max_diff_files=0, max_diff_lines=0)
+    monkeypatch.setattr(gitutil, "diff_stat", lambda _w, _r: (999, 9999, 9999))
+    report = orchestrator.RepoReport(slug=repo.slug)
+    result = orchestrator._check_blast_radius(gh, None, Config(), repo, 1, None, lambda _m: None, report)
+    assert result is True
+    assert gh.calls == []
+
+
+def test_check_blast_radius_unparseable_safe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gh = _blast_gh()
+    repo = RepoEntry(owner="o", name="r")
+    monkeypatch.setattr(gitutil, "diff_stat", lambda _w, _r: None)
+    report = orchestrator.RepoReport(slug=repo.slug)
+    result = orchestrator._check_blast_radius(gh, None, Config(), repo, 1, None, lambda _m: None, report)
+    assert result is True
+    assert gh.calls == []
+
+
+def test_check_blast_radius_no_branch_push_required(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gh = _blast_gh()
+    repo = RepoEntry(owner="o", name="r")
+
+    def raise_if_called(*_a: object, **_kw: object) -> None:
+        raise AssertionError("push_branch should not be called")
+
+    monkeypatch.setattr(gitutil, "push_branch", raise_if_called)
+    monkeypatch.setattr(gitutil, "diff_stat", lambda _w, _r: (45, 10, 5))
+    # This must not raise — proving push_branch was never invoked.
+    report = orchestrator.RepoReport(slug=repo.slug)
+    result = orchestrator._check_blast_radius(
+        gh,
+        None,
+        Config(),
+        repo,
+        1,
+        None,
+        lambda _m: None,
+        report,
+    )
+    assert result is False
+
+
+def test_run_build_blast_radius_prevents_reviewer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When blast radius triggers, the reviewer is never called."""
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    repo = RepoEntry(owner="octocat", name="hello")
+    issue = Issue(number=1, title="t", body="b", state="open", labels=[], user="u", html_url="")
+    issue_dir = ws.issue_dir(repo.owner, repo.name, issue.number)
+    store = TaskStore(issue_dir)
+    _, tasks = planner.parse_manifest({"tasks": [{"id": "t1", "title": "one"}]})
+    store.materialize(tasks)
+
+    monkeypatch.setattr(gitutil, "ensure_work_clone", lambda *_a, **_k: None)
+
+    def fake_run_task(_ws, _cfg, _repo, number, task, _work_dir, *, token):  # noqa: ANN001, ANN202
+        TaskStore(ws.issue_dir(repo.owner, repo.name, number)).set_status(task.id, DONE, summary="ok")
+        return worker.WorkResult(task_id=task.id, status=DONE, committed=True)
+
+    monkeypatch.setattr(worker, "run_task", fake_run_task)
+
+    # Stub diff_stat to trigger the blast radius.
+    monkeypatch.setattr(gitutil, "diff_stat", lambda _w, _r: (45, 10, 5))
+
+    reviewer_called: list[str] = []
+
+    def fake_review_issue(*_a: object, **_kw: object) -> object:
+        reviewer_called.append("called")
+        from cheaphelp._internal.reviewer import ReviewResult  # noqa: PLC0415
+
+        return ReviewResult(number=1, decision="open-pr")
+
+    monkeypatch.setattr(reviewer, "review_issue", fake_review_issue)
+
+    gh = _RecBuildGH()
+    report = orchestrator.RepoReport(slug=repo.slug)
+    config = Config()
+    orchestrator._run_build(
+        gh,
+        ws,
+        config,
+        repo,
+        issue,
+        "token",
+        lambda _m: None,
+        report,
+    )
+
+    # The reviewer must not have been called.
+    assert reviewer_called == [], "reviewer was called despite blast-radius trigger"
+
+    # needs-human label was added.
+    add_labels_calls = [c for c in gh.calls if c[0] == "add_labels"]
+    needs_human_added = any(config.labels["needs_human"] in c[1][-1] for c in add_labels_calls)
+    assert needs_human_added, "needs-human label should have been added"
