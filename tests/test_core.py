@@ -547,7 +547,6 @@ def test_process_repo_reclassifies_under_lock_and_skips_when_advanced(
         ws,
         Config(),
         repo,
-        "mybot",
         "token",
         dry_run=False,
         log=lambda _m: None,
@@ -606,7 +605,6 @@ def test_process_repo_proceeds_when_stage_unchanged_under_lock(
         ws,
         Config(),
         repo,
-        "mybot",
         "token",
         dry_run=False,
         log=lambda _m: None,
@@ -951,7 +949,6 @@ def test_responder_build_prompt_with_conventions() -> None:
     prompt = build_prompt(
         _issue(number=1),
         [_comment("hello", "alice")],
-        "mybot",
         conventions="house rules: no emoji",
     )
     assert "## Repository conventions" in prompt
@@ -2117,7 +2114,6 @@ def test_run_responder_forwards_conventions(
     def recording_build_prompt(
         issue: object,
         comments: object,
-        bot_login: object,
         *,
         conventions: str = "",
     ) -> str:
@@ -2136,7 +2132,6 @@ def test_run_responder_forwards_conventions(
         repo,
         fake_gh._issue(),
         [],
-        "mybot",
         clone_dir,
         lambda _m: None,
         report,
@@ -2216,7 +2211,6 @@ def test_run_responder_no_conventions_when_file_absent(
     def recording_build_prompt(
         issue: object,
         comments: object,
-        bot_login: object,
         *,
         conventions: str = "",
     ) -> str:
@@ -2235,7 +2229,6 @@ def test_run_responder_no_conventions_when_file_absent(
         repo,
         fake_gh._issue(),
         [],
-        "mybot",
         clone_dir,
         lambda _m: None,
         report,
@@ -2473,7 +2466,6 @@ def test_run_responder_records_cost(
         repo,
         issue,
         [],
-        "mybot",
         tmp_path,
         lambda _m: None,
         report,
@@ -2521,7 +2513,6 @@ def test_run_responder_skips_cost_when_usage_none(
         repo,
         issue,
         [],
-        "mybot",
         tmp_path,
         lambda _m: None,
         report,
@@ -3306,7 +3297,6 @@ def test_process_repo_rework_stage_done(
         ws,
         Config(),
         repo,
-        "mybot",
         "token",
         dry_run=False,
         log=lambda _m: None,
@@ -3346,7 +3336,6 @@ def test_process_repo_rework_stage_no_feedback(
         ws,
         Config(),
         repo,
-        "mybot",
         "token",
         dry_run=False,
         log=lambda _m: None,
