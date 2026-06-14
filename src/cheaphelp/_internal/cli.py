@@ -232,6 +232,22 @@ def get_parser() -> argparse.ArgumentParser:
     )
     p_clean.set_defaults(func=commands.cmd_clean)
 
+    # logs
+    p_logs = subparsers.add_parser("logs", help="Show recent run activity, or follow it live.")
+    p_logs.add_argument(
+        "--follow",
+        "-f",
+        action="store_true",
+        help="Stream new log lines as they are appended (Ctrl-C to stop).",
+    )
+    p_logs.add_argument(
+        "--issue",
+        type=int,
+        metavar="N",
+        help="Show only lines that reference issue #N.",
+    )
+    p_logs.set_defaults(func=commands.cmd_logs)
+
     return parser
 
 
