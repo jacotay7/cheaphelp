@@ -384,7 +384,7 @@ def _process_repo(
             log(f"  ! {repo.slug}: clone failed: {exc}")
             return report
 
-    for stage, issue, comments in work:
+    for stage, issue, _comments in work:
         # Per-issue lock: if another tick is already on this issue, skip it (don't
         # block) and move to the next so concurrent ticks make progress.
         with RunLock(workspace.issue_lock_path(repo.owner, repo.name, issue.number)) as issue_lock:
@@ -395,13 +395,42 @@ def _process_repo(
                 report.issues_skipped += 1
                 report.actions.append(f"#{issue.number}: skipped (in progress elsewhere)")
                 continue
+            # Re-validate under the lock. Between classifying this issue and
+            # acquiring its lock, an overlapping tick may have already acted on it
+            # (responded, planned, advanced it to a later stage). Re-fetch the
+            # current state and act only if it is still the same stage — this makes
+            # overlapping ticks idempotent: no double responses, plans, etc.
+            try:
+                fresh_issue = gh.get_issue(repo.owner, repo.name, issue.number)
+                fresh_comments = gh.list_issue_comments(repo.owner, repo.name, issue.number)
+            except Exception as exc:  # noqa: BLE001 - a refresh failure must not abort the tick
+                log(f"  ! {repo.slug}#{issue.number}: could not refresh state: {_short_exc(exc)}")
+                report.actions.append(f"#{issue.number}: refresh failed")
+                continue
+            current = classify(fresh_issue, fresh_comments, bot_login, config)
+            if current != stage:
+                log(f"  · {repo.slug}#{issue.number}: now '{current}' (was '{stage}'); already handled, skipping")
+                report.issues_skipped += 1
+                report.actions.append(f"#{issue.number}: skipped (already {current})")
+                continue
             try:
                 if stage == "responder":
-                    _run_responder(gh, workspace, config, repo, issue, comments, bot_login, cwd, log, report)
+                    _run_responder(
+                        gh,
+                        workspace,
+                        config,
+                        repo,
+                        fresh_issue,
+                        fresh_comments,
+                        bot_login,
+                        cwd,
+                        log,
+                        report,
+                    )
                 elif stage == "planner":
-                    _run_planner(gh, workspace, config, repo, issue, cwd, log, report)
+                    _run_planner(gh, workspace, config, repo, fresh_issue, cwd, log, report)
                 elif stage == "build":
-                    _run_build(gh, workspace, config, repo, issue, token, log, report)
+                    _run_build(gh, workspace, config, repo, fresh_issue, token, log, report)
             except Exception as exc:  # noqa: BLE001 - one issue's failure must not abort the tick
                 log(f"  ! {repo.slug}#{issue.number}: {stage} crashed: {_short_exc(exc)}")
                 report.actions.append(f"#{issue.number}: {stage} crashed")

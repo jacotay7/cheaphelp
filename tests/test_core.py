@@ -277,6 +277,113 @@ def test_process_repo_skips_locked_issue(
     assert report.turns_taken == 0
 
 
+class _AdvancedUnderLockGH:
+    """list_open_issues shows a responder issue, but get_issue shows it already advanced.
+
+    Simulates an overlapping tick finalizing the issue between our classification and
+    our acquiring its lock (the #57 race).
+    """
+
+    def __init__(self, ready_label: str) -> None:
+        self._ready = ready_label
+
+    def list_open_issues(self, _owner: str, _name: str) -> list[Issue]:
+        return [Issue(number=1, title="t", body="b", state="open", labels=[], user="human", html_url="")]
+
+    def list_issue_comments(self, _owner: str, _name: str, _number: int) -> list[Comment]:
+        return []
+
+    def get_issue(self, _owner: str, _name: str, _number: int) -> Issue:
+        return Issue(number=1, title="t", body="b", state="open", labels=[self._ready], user="human", html_url="")
+
+    def authenticated_login(self) -> str:
+        return "mybot"
+
+
+def test_process_repo_reclassifies_under_lock_and_skips_when_advanced(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    monkeypatch.setenv("CHEAPHELP_AGENT_MOCK", "/dev/null")  # _is_mock(): no clone
+    repo = RepoEntry(owner="octocat", name="hello")
+    gh = _AdvancedUnderLockGH(Config().labels["ready"])
+
+    report = _process_repo(
+        gh,  # ty: ignore[invalid-argument-type]
+        ws,
+        Config(),
+        repo,
+        "mybot",
+        "token",
+        dry_run=False,
+        log=lambda _m: None,
+    )
+    # Classified as responder, but the under-lock re-check sees it is now `ready`
+    # (stage "planner"), so it is skipped without running the responder.
+    assert report.issues_considered == 1
+    assert report.issues_skipped == 1
+    assert report.turns_taken == 0
+    assert any("already planner" in a for a in report.actions)
+
+
+class _RecordingResponderGH:
+    """Stays at the responder stage on re-check; records any comment posted."""
+
+    def __init__(self) -> None:
+        self.comments: list[tuple[int, str]] = []
+
+    def _issue(self) -> Issue:
+        return Issue(number=1, title="t", body="b", state="open", labels=[], user="human", html_url="")
+
+    def list_open_issues(self, _owner: str, _name: str) -> list[Issue]:
+        return [self._issue()]
+
+    def list_issue_comments(self, _owner: str, _name: str, _number: int) -> list[Comment]:
+        return []
+
+    def get_issue(self, _owner: str, _name: str, _number: int) -> Issue:
+        return self._issue()
+
+    def create_comment(self, _owner: str, _name: str, number: int, body: str) -> Comment:
+        self.comments.append((number, body))
+        return Comment(id=1, body=body, user="mybot", created_at="")
+
+    def authenticated_login(self) -> str:
+        return "mybot"
+
+
+def test_process_repo_proceeds_when_stage_unchanged_under_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    decision = tmp_path / "decision.json"
+    decision.write_text(
+        '```json\n{"action": "comment", "reply": "one question?", "issue_md": ""}\n```',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CHEAPHELP_AGENT_MOCK", str(decision))
+    repo = RepoEntry(owner="octocat", name="hello")
+    gh = _RecordingResponderGH()
+
+    report = _process_repo(
+        gh,  # ty: ignore[invalid-argument-type]
+        ws,
+        Config(),
+        repo,
+        "mybot",
+        "token",
+        dry_run=False,
+        log=lambda _m: None,
+    )
+    # Stage is unchanged on re-check, so the responder runs and posts its comment.
+    assert report.turns_taken == 1
+    assert [n for n, _ in gh.comments] == [1]
+
+
 def test_parse_depends_on() -> None:
     assert parse_depends_on("# Title\n\nDepends-on: #41, #42\n\n## Summary\n") == [41, 42]
     # Case-insensitive, "Depends on" spelling, bare numbers, dedup + sort.
