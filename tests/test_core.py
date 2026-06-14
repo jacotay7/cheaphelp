@@ -127,10 +127,24 @@ def test_retry_base_delay_default_and_roundtrip() -> None:
     assert Config.from_dict({"retry_base_delay": "0.5"}).retry_base_delay == 0.5
 
 
-def _make_github_client(handler: Callable[[httpx.Request], httpx.Response], **kwargs: object) -> GitHubClient:
+def _make_github_client(
+    handler: Callable[[httpx.Request], httpx.Response],
+    *,
+    root: str = "https://api.github.com",
+    timeout: float = 30.0,
+    retry_attempts: int = 3,
+    retry_base_delay: float = 1.0,
+) -> GitHubClient:
     """Build a GitHubClient wired to an httpx.MockTransport (no network)."""
-    client = httpx.Client(base_url="https://api.github.com", transport=httpx.MockTransport(handler))
-    return GitHubClient("test-token", client=client, **kwargs)
+    client = httpx.Client(base_url=root, transport=httpx.MockTransport(handler))
+    return GitHubClient(
+        "test-token",
+        root=root,
+        timeout=timeout,
+        retry_attempts=retry_attempts,
+        retry_base_delay=retry_base_delay,
+        client=client,
+    )
 
 
 # --- GitHubClient retry tests -----------------------------------------------
