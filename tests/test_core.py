@@ -2472,6 +2472,7 @@ def test_run_planner_records_cost(
     # Mock apply_plan so it doesn't actually modify GitHub state.
     def fake_apply_plan(*_a: object, **_kw: object) -> object:
         from cheaphelp._internal.planner import PlanResult  # noqa: PLC0415
+
         return PlanResult(number=1, task_count=1)
 
     monkeypatch.setattr(planner, "apply_plan", fake_apply_plan)

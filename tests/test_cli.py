@@ -539,6 +539,110 @@ def test_run_swallows_log_write_errors(
         blocker.rmdir()
 
 
+def _usage_data(
+    prompt_tokens: int = 0,
+    completion_tokens: int = 0,
+    total_tokens: int = 0,
+    cost_usd: float = 0.0,
+) -> SimpleNamespace:
+    """Build a UsageData-like SimpleNamespace for test stubs."""
+    return SimpleNamespace(
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=total_tokens,
+        cost_usd=cost_usd,
+    )
+
+
+def test_run_shows_cost_summary(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The cost summary is printed to stdout and the daily log when costs are non-zero."""
+    ws = _setup_workspace(tmp_path)
+
+    ud = _usage_data(prompt_tokens=1234, completion_tokens=567, total_tokens=1801, cost_usd=0.042)
+    repo = SimpleNamespace(
+        slug="octocat/hello",
+        issue_costs={
+            7: {
+                "responder": [_usage_data(prompt_tokens=200, completion_tokens=80, total_tokens=280, cost_usd=0.002)],
+                "planner": [_usage_data(prompt_tokens=400, completion_tokens=200, total_tokens=600, cost_usd=0.008)],
+                "worker": [
+                    _usage_data(prompt_tokens=400, completion_tokens=200, total_tokens=600, cost_usd=0.019),
+                    _usage_data(prompt_tokens=0, completion_tokens=0, total_tokens=0, cost_usd=0.0),
+                ],
+                "reviewer": [_usage_data(prompt_tokens=234, completion_tokens=87, total_tokens=321, cost_usd=0.002)],
+            },
+        },
+        cost=ud,
+    )
+
+    def fake_tick(
+        workspace: Workspace,
+        *,
+        dry_run: bool,
+        log: Callable[[str], None],
+        max_issues: int = 0,
+    ) -> SimpleNamespace:
+        log("hello-from-stub")
+        return SimpleNamespace(error=None, total_turns=3, repos=[repo], total_cost=ud)
+
+    monkeypatch.setattr(commands, "tick", fake_tick)
+
+    rc = main(["--home", str(ws.home), "run"])
+    assert rc == 0
+
+    captured = capsys.readouterr().out
+    assert "Cost: $0.042 (1,234 prompt + 567 completion tokens)" in captured
+    assert (
+        "octocat/hello#7:   $0.031  (responder $0.002, planner $0.008, worker x2 $0.019, reviewer $0.002)" in captured
+    )
+
+    # Also check the daily log contains the cost lines.
+    log_path = ws.logs_dir / f"run-{datetime.datetime.now(datetime.timezone.utc).date().isoformat()}.log"
+    assert log_path.exists()
+    log_contents = log_path.read_text(encoding="utf-8")
+    assert "Cost: $0.042 (1,234 prompt + 567 completion tokens)" in log_contents
+    assert (
+        "octocat/hello#7:   $0.031  (responder $0.002, planner $0.008, worker x2 $0.019, reviewer $0.002)"
+        in log_contents
+    )
+
+
+def test_run_no_cost_when_zero(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With zero costs (default UsageData), no cost line is emitted to stdout or log."""
+    ws = _setup_workspace(tmp_path)
+
+    def fake_tick(
+        workspace: Workspace,
+        *,
+        dry_run: bool,
+        log: Callable[[str], None],
+        max_issues: int = 0,
+    ) -> SimpleNamespace:
+        log("hello-from-stub")
+        return SimpleNamespace(error=None, total_turns=0, repos=[], total_cost=_usage_data())
+
+    monkeypatch.setattr(commands, "tick", fake_tick)
+
+    rc = main(["--home", str(ws.home), "run"])
+    assert rc == 0
+
+    captured = capsys.readouterr().out
+    assert "Cost:" not in captured
+
+    log_path = ws.logs_dir / f"run-{datetime.datetime.now(datetime.timezone.utc).date().isoformat()}.log"
+    if log_path.exists():
+        log_contents = log_path.read_text(encoding="utf-8")
+        assert "Cost:" not in log_contents
+
+
 # --- status ----------------------------------------------------------------
 # Test-only token string written into the workspace `.env` by the status
 # tests. A real `GITHUB_TOKEN` is never read or sent anywhere in tests; this
@@ -915,6 +1019,135 @@ def test_status_no_workspace_exits_1(
     assert rc == 1
     err = capsys.readouterr().err
     assert "No workspace" in err
+
+
+def test_status_shows_costs_flag(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``cheaphelp status --costs`` shows the cumulative cost for each issue."""
+    ws = _setup_workspace(tmp_path)
+    _seed_workspace_env(ws, token=_TEST_TOKEN)
+
+    Registry(ws.registry_path).add(RepoEntry(owner="octocat", name="hello", enabled=True))
+
+    # Seed a cost.json for issue #7.
+    issue_dir = ws.issue_dir("octocat", "hello", 7)
+    issue_dir.mkdir(parents=True, exist_ok=True)
+    (issue_dir / "cost.json").write_text(
+        json.dumps({"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15, "cost_usd": 0.0123}),
+        encoding="utf-8",
+    )
+
+    fake = _FakeGH("test-token")
+    fake.issues["octocat/hello"] = [
+        Issue(
+            number=7,
+            title="Costly issue",
+            body="",
+            state="open",
+            labels=[],
+            user="alice",
+            html_url="",
+        ),
+    ]
+
+    def _factory(token: str, **_kwargs: object) -> _FakeGH:
+        fake.token = token
+        return fake
+
+    monkeypatch.setattr(commands, "GitHubClient", _factory)
+
+    rc = main(["--home", str(ws.home), "status", "--costs"])
+    assert rc == 0
+
+    captured = capsys.readouterr().out
+    # The issue line must include the dollar amount.
+    assert "$0.012" in captured
+    assert "#7" in captured
+
+
+def test_status_no_costs_when_flag_absent(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without ``--costs``, the output has no cost column (no ``$`` on issue lines)."""
+    ws = _setup_workspace(tmp_path)
+    _seed_workspace_env(ws, token=_TEST_TOKEN)
+
+    Registry(ws.registry_path).add(RepoEntry(owner="octocat", name="hello", enabled=True))
+
+    fake = _FakeGH("test-token")
+    fake.issues["octocat/hello"] = [
+        Issue(
+            number=7,
+            title="Normal issue",
+            body="",
+            state="open",
+            labels=[],
+            user="alice",
+            html_url="",
+        ),
+    ]
+    fake.comments[("octocat/hello", 7)] = [
+        Comment(id=1, body="hi", user=fake.login, created_at=""),
+    ]
+
+    def _factory(token: str, **_kwargs: object) -> _FakeGH:
+        fake.token = token
+        return fake
+
+    monkeypatch.setattr(commands, "GitHubClient", _factory)
+
+    rc = main(["--home", str(ws.home), "status"])
+    assert rc == 0
+
+    captured = capsys.readouterr().out
+    # Issue line should not contain a dollar sign (no cost column).
+    issue_lines = [line for line in captured.splitlines() if "#7" in line]
+    assert issue_lines
+    assert "$" not in issue_lines[0]
+
+
+def test_status_costs_zero_when_no_cost_file(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``cheaphelp status --costs`` on an issue with no cost.json shows $0.000 (no crash)."""
+    ws = _setup_workspace(tmp_path)
+    _seed_workspace_env(ws, token=_TEST_TOKEN)
+
+    Registry(ws.registry_path).add(RepoEntry(owner="octocat", name="hello", enabled=True))
+    # No cost.json written.
+
+    fake = _FakeGH("test-token")
+    fake.issues["octocat/hello"] = [
+        Issue(
+            number=7,
+            title="No cost file",
+            body="",
+            state="open",
+            labels=[],
+            user="alice",
+            html_url="",
+        ),
+    ]
+
+    def _factory(token: str, **_kwargs: object) -> _FakeGH:
+        fake.token = token
+        return fake
+
+    monkeypatch.setattr(commands, "GitHubClient", _factory)
+
+    rc = main(["--home", str(ws.home), "status", "--costs"])
+    assert rc == 0
+
+    captured = capsys.readouterr().out
+    assert "$0.000" in captured
+    assert "#7" in captured
 
 
 # --- clean -----------------------------------------------------------------

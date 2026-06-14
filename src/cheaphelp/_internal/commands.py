@@ -26,8 +26,10 @@ from cheaphelp._internal.env import (
     update_env_file,
 )
 from cheaphelp._internal.github import GitHubClient, GitHubError
+from cheaphelp._internal.opencode import UsageData
 from cheaphelp._internal.orchestrator import classify, tick
 from cheaphelp._internal.registry import Registry, RepoEntry, parse_slug
+from cheaphelp._internal.tasks import IssueCostStore
 
 _LOG_TAIL_LINES = 50
 
@@ -41,6 +43,57 @@ def _require_workspace(ws: Workspace) -> int | None:
         print(f"No workspace at {ws.home}. Run `cheaphelp init` first.", file=sys.stderr)
         return 1
     return None
+
+
+def _format_cost_lines(report: object) -> list[str]:
+    """Return the per-tick cost summary lines (excluding the leading "Cost:").
+
+    The first line is the aggregate; subsequent lines are per-issue with a
+    per-role breakdown. Returns [] when there is no recorded cost.
+    """
+    total_cost: UsageData = getattr(report, "total_cost", UsageData())
+    if total_cost.cost_usd == 0.0 and total_cost.total_tokens == 0:
+        return []
+
+    lines: list[str] = [
+        f"Cost: ${total_cost.cost_usd:.3f} ({total_cost.prompt_tokens:,} prompt + {total_cost.completion_tokens:,} completion tokens)",
+    ]
+
+    repos: list[object] = getattr(report, "repos", [])
+    for repo in repos:
+        slug: str = getattr(repo, "slug", "")
+        issue_costs: dict[int, dict[str, list[UsageData]]] = getattr(repo, "issue_costs", {})
+        for number in sorted(issue_costs):
+            by_role = issue_costs[number]
+            # Compute issue_total and breakdown_str.
+            role_order = ["responder", "planner", "worker", "reviewer"]
+            seen: set[str] = set()
+            parts: list[str] = []
+            issue_total = UsageData()
+            for role in role_order:
+                if role in by_role:
+                    seen.add(role)
+                    usages = by_role[role]
+                    total_for_role = sum(usages, UsageData())
+                    issue_total += total_for_role
+                    count = len(usages)
+                    if count > 1:
+                        parts.append(f"{role} x{count} ${total_for_role.cost_usd:.3f}")
+                    else:
+                        parts.append(f"{role} ${total_for_role.cost_usd:.3f}")
+            # Remaining roles (outside the stable order).
+            for role in sorted(by_role):
+                if role not in seen:
+                    usages = by_role[role]
+                    total_for_role = sum(usages, UsageData())
+                    issue_total += total_for_role
+                    count = len(usages)
+                    if count > 1:
+                        parts.append(f"{role} x{count} ${total_for_role.cost_usd:.3f}")
+                    else:
+                        parts.append(f"{role} ${total_for_role.cost_usd:.3f}")
+            lines.append(f"  {slug}#{number}:   ${issue_total.cost_usd:.3f}  ({', '.join(parts)})")
+    return lines
 
 
 # --- init ------------------------------------------------------------------
@@ -257,6 +310,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     if getattr(report, "skipped", False):
         return 0  # skip message already logged via the tick's `log` callback
     print(f"\nDone. {report.total_turns} agent turn(s) across {len(report.repos)} repo(s).")
+    for cost_line in _format_cost_lines(report):
+        log(cost_line)
     return 0
 
 
@@ -370,6 +425,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         return 0
 
     title_width = 60
+    show_costs = getattr(args, "costs", False)
     try:
         with GitHubClient(token) as gh:
             bot_login = gh.authenticated_login()
@@ -392,7 +448,11 @@ def cmd_status(args: argparse.Namespace) -> int:
                     stage = classify(issue, comments, bot_login, config)
                     label = stage
                     title = issue.title[: title_width - 1] + "\u2026" if len(issue.title) > title_width else issue.title
-                    print(f"  #{issue.number:<6} {title:<{title_width}}  {label}")
+                    if show_costs:
+                        cost = IssueCostStore(ws.issue_dir(repo.owner, repo.name, issue.number)).load()
+                        print(f"  #{issue.number:<6} {title:<{title_width}}  {label}  ${cost.cost_usd:.3f}")
+                    else:
+                        print(f"  #{issue.number:<6} {title:<{title_width}}  {label}")
     except GitHubError as exc:
         print(f"GitHub API error: {exc}", file=sys.stderr)
         return 1
