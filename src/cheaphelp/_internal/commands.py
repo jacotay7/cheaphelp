@@ -565,6 +565,8 @@ _CONFIG_SCALAR_KEYS: dict[str, type] = {
     "poll_interval": str,
     "opencode_bin": str,
     "agent_timeout": float,
+    "daily_budget_usd": float,
+    "budget_warn_at": float,
     "max_issues_per_tick": int,
     "max_tasks_per_tick": int,
     "max_task_attempts": int,
