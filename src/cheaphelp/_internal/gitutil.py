@@ -43,6 +43,7 @@ def _run(args: list[str], *, cwd: Path | None = None) -> str:
         cwd=str(cwd) if cwd else None,
         capture_output=True,
         text=True,
+        encoding="utf-8",
         check=False,
     )
     if proc.returncode != 0:
@@ -144,10 +145,19 @@ def run_command(clone_dir: Path, command: str, *, timeout: float = 900.0) -> tup
         shell=True,
         capture_output=True,
         text=True,
+        encoding="utf-8",
         timeout=timeout,
         check=False,
     )
     return proc.returncode, (proc.stdout + proc.stderr)
+
+
+def rev_parse(cwd: Path, ref: str = "HEAD") -> str:
+    """Return the SHA of *ref* (default ``HEAD``) as a trimmed hex string.
+
+    Raises :class:`GitError` if the ref does not exist or the git command fails.
+    """
+    return _run(["rev-parse", ref], cwd=cwd)
 
 
 def diff_against_base(clone_dir: Path, repo: RepoEntry) -> tuple[str, str]:
