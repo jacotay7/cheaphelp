@@ -1,7 +1,7 @@
 """Install cheaphelp as a systemd *user* service driven by a timer.
 
 We use user units (`systemctl --user`) so no root is required. The timer fires
-`cheaphelp run --once` on an interval. Note that user timers only run while the
+`cheaphelp run` on an interval. Note that user timers only run while the
 user has a session unless lingering is enabled (`loginctl enable-linger`).
 """
 
@@ -49,7 +49,7 @@ class UnitFiles:
 
 def _exec_start() -> str:
     """Command the service runs. Uses the current interpreter's `-m cheaphelp`."""
-    return f"{sys.executable} -m cheaphelp run --once"
+    return f"{sys.executable} -m cheaphelp run"
 
 
 def render_units(*, home: Path | None, interval: str, description: str = "cheaphelp") -> UnitFiles:
