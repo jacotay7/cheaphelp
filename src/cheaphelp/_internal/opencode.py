@@ -273,6 +273,12 @@ def _mock_result() -> AgentResult | None:
     return AgentResult(returncode=0, stdout=text, stderr="", decision=extract_decision(text))
 
 
+_REPROMPT_SUFFIX = (
+    "Reminder: your entire reply must be EXACTLY ONE fenced ```json code block "
+    "and nothing else — no prose before or after it. Reply with only that block now."
+)
+
+
 def run_agent(
     workspace: Workspace,
     config: Config,
@@ -312,7 +318,7 @@ def run_agent(
     # operate on the parent process's directory instead of the clone.
     env["PWD"] = str(cwd)
 
-    command = [
+    base_command = [
         binary,
         "run",
         "--dir",
@@ -324,20 +330,29 @@ def run_agent(
     ]
     variant = config.variant_for(role)
     if variant:
-        command += ["--variant", variant]
-    command.append(prompt)
-    proc = subprocess.run(
-        command,
-        cwd=str(cwd),
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        check=False,
-    )
-    return AgentResult(
-        returncode=proc.returncode,
-        stdout=proc.stdout,
-        stderr=proc.stderr,
-        decision=extract_decision(proc.stdout),
-    )
+        base_command += ["--variant", variant]
+
+    def _invoke(prompt_text: str) -> AgentResult:
+        proc = subprocess.run(
+            [*base_command, prompt_text],
+            cwd=str(cwd),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+        return AgentResult(
+            returncode=proc.returncode,
+            stdout=proc.stdout,
+            stderr=proc.stderr,
+            decision=extract_decision(proc.stdout),
+        )
+
+    result = _invoke(prompt)
+    # The contract is a single final ```json block. If the agent exited cleanly
+    # but we couldn't parse one, give it exactly one more chance with a pointed
+    # reminder before the caller treats the turn as a failure.
+    if result.decision is None and result.returncode == 0:
+        result = _invoke(f"{prompt}\n\n{_REPROMPT_SUFFIX}")
+    return result

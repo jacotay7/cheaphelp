@@ -8,13 +8,16 @@ summary, and advances task state. One task is run per call.
 from __future__ import annotations
 
 import os
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
 from cheaphelp._internal import gitutil, opencode
 from cheaphelp._internal.config import Config, Workspace
 from cheaphelp._internal.registry import RepoEntry
-from cheaphelp._internal.tasks import BLOCKED, DONE, Task, TaskStore
+from cheaphelp._internal.tasks import BLOCKED, DONE, PENDING, Task, TaskStore
+
+TIMEOUT = "timeout"  # WorkResult status for a retryable agent timeout
 
 
 def branch_name(number: int) -> str:
@@ -78,7 +81,17 @@ def run_task(
 
     store.set_status(task.id, "in_progress")
     prompt = build_prompt(task, issue_md)
-    result = opencode.run_agent(workspace, config, "worker", prompt, cwd=clone_dir, timeout=config.agent_timeout)
+    try:
+        result = opencode.run_agent(workspace, config, "worker", prompt, cwd=clone_dir, timeout=config.agent_timeout)
+    except subprocess.TimeoutExpired:
+        # A timeout is retryable: reset to pending and let the next tick try
+        # again, escalating to blocked (-> needs-human) only after the limit.
+        attempts = store.record_attempt(task.id)
+        if attempts >= config.max_task_attempts:
+            store.set_status(task.id, BLOCKED, summary=f"Worker timed out after {attempts} attempt(s).")
+            return WorkResult(task_id=task.id, status=BLOCKED, error="timeout")
+        store.set_status(task.id, PENDING)
+        return WorkResult(task_id=task.id, status=TIMEOUT, error="timeout")
 
     decision = result.decision or {}
     status = str(decision.get("status", "")).strip().lower()

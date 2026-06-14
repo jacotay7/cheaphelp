@@ -37,6 +37,7 @@ class Task:
     verify: str = ""
     status: str = PENDING
     summary: str = ""
+    attempts: int = 0  # worker runs spent on this task (for timeout retry/escalation)
 
     @classmethod
     def from_manifest(cls, data: dict) -> Task:
@@ -129,3 +130,14 @@ class TaskStore:
                 if summary:
                     task.summary = summary
         self.materialize(tasks)
+
+    def record_attempt(self, task_id: str) -> int:
+        """Increment a task's attempt counter and return the new count."""
+        tasks = self.load()
+        count = 0
+        for task in tasks:
+            if task.id == task_id:
+                task.attempts += 1
+                count = task.attempts
+        self.materialize(tasks)
+        return count
