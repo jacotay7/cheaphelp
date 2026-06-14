@@ -1774,6 +1774,215 @@ def test_daily_spend_tracker_was_warned_false_for_unseen(tmp_path: Path) -> None
     assert tracker.was_warned(0.95) is False
 
 
+# --- budget guardrail integration tests --------------------------------------
+
+
+class _BudgetFakeGH:
+    """Minimal GitHub stand-in for budget-gating _process_repo tests.
+
+    Supports get_issue, create_comment, and two responder-classified issues.
+    """
+
+    def __init__(self, issue_count: int = 2) -> None:
+        self._issues = [
+            Issue(number=n, title="t", body="b", state="open", labels=[], user="human", html_url="")
+            for n in range(1, issue_count + 1)
+        ]
+        self.comments: list[tuple[int, str]] = []
+
+    def list_open_issues(self, _owner: str, _name: str) -> list[Issue]:
+        return list(self._issues)
+
+    def list_issue_comments(self, _owner: str, _name: str, _number: int) -> list[Comment]:
+        return []
+
+    def get_issue(self, _owner: str, _name: str, number: int) -> Issue:
+        return Issue(number=number, title="t", body="b", state="open", labels=[], user="human", html_url="")
+
+    def create_comment(self, _owner: str, _name: str, number: int, body: str) -> Comment:
+        self.comments.append((number, body))
+        return Comment(id=1, body=body, user="mybot", created_at="")
+
+    def authenticated_login(self) -> str:
+        return "mybot"
+
+
+def test_process_repo_skips_all_issues_when_budget_exhausted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pre-fill the daily tracker; _process_repo returns immediately with budget_exhausted=True."""
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    ws.save_config(Config())
+    monkeypatch.setenv("CHEAPHELP_AGENT_MOCK", "/dev/null")
+    repo = RepoEntry(owner="octocat", name="hello")
+
+    # Pre-fill the daily spend file so total_usd == the cap.
+    tracker = DailySpendTracker(ws.state_dir)
+    tracker.record(opencode.UsageData(cost_usd=1.0))
+    assert tracker.daily_spend() == 1.0
+
+    fake_gh = _FakeGitHub(3)
+    cfg = Config.from_dict({"daily_budget_usd": 1.0})
+    report = _process_repo(
+        fake_gh,  # ty: ignore[invalid-argument-type]
+        ws,
+        cfg,
+        repo,
+        "token",
+        dry_run=False,
+        log=lambda _m: None,
+        tracker=tracker,
+    )
+    assert report.budget_exhausted is True
+    assert report.actions == []
+
+
+def test_process_repo_skips_stage_when_budget_crosses_during_tick(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """First issue's responder runs (spend exceeds cap); second issue is budget-skipped."""
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    ws.save_config(Config())
+    monkeypatch.setenv("CHEAPHELP_AGENT_MOCK", "/dev/null")
+    repo = RepoEntry(owner="octocat", name="hello")
+
+    tracker = DailySpendTracker(ws.state_dir)
+    cfg = Config.from_dict({"daily_budget_usd": 0.01})
+
+    agent_calls: list[str] = []
+
+    def fake_run_agent(*_a: object, **_kw: object) -> opencode.AgentResult:
+        agent_calls.append("called")
+        return opencode.AgentResult(
+            returncode=0,
+            stdout='```json\n{"action": "finalize"}\n```',
+            stderr="",
+            decision={"action": "finalize"},
+            usage=opencode.UsageData(cost_usd=0.02),
+        )
+
+    monkeypatch.setattr(opencode, "run_agent", fake_run_agent)
+
+    fake_gh = _BudgetFakeGH(2)
+    report = _process_repo(
+        fake_gh,  # ty: ignore[invalid-argument-type]
+        ws,
+        cfg,
+        repo,
+        "token",
+        dry_run=False,
+        log=lambda _m: None,
+        tracker=tracker,
+    )
+
+    # First issue ran, second was budget-skipped.
+    assert len(agent_calls) == 1
+    assert report.budget_exhausted is True
+    assert report.daily_spend >= 0.01
+
+    # Exactly one "budget-exceeded" action.
+    budget_actions = [a for a in report.actions if "budget-exceeded" in a]
+    assert len(budget_actions) == 1
+
+    # Exactly one pause comment was posted.
+    assert len(fake_gh.comments) == 1
+    posted_number = fake_gh.comments[0][0]
+    assert posted_number in (1, 2)
+
+
+def test_run_build_aborts_before_reviewer_when_budget_exhausted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After the worker runs, the tracker reports spend >= cap, so the reviewer must NOT be called."""
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    repo = RepoEntry(owner="octocat", name="hello")
+    issue = Issue(number=1, title="t", body="b", state="open", labels=[], user="u", html_url="")
+    issue_dir = ws.issue_dir(repo.owner, repo.name, issue.number)
+    store = TaskStore(issue_dir)
+    _, tasks = planner.parse_manifest({"tasks": [{"id": "t1", "title": "one"}]})
+    store.materialize(tasks)
+
+    monkeypatch.setattr(gitutil, "ensure_work_clone", lambda *_a, **_k: None)
+    monkeypatch.setattr(gitutil, "diff_stat", lambda *_a, **_k: None)
+    monkeypatch.setattr(gitutil, "commit_all", lambda *_a, **_k: False)
+    monkeypatch.setattr(gitutil, "push_branch", lambda *_a, **_k: None)
+
+    # Worker usage = 0.005, cap = 0.001 => after worker runs, cap is exceeded.
+    worker_usage = opencode.UsageData(cost_usd=0.005)
+
+    def fake_run_task(_ws, _cfg, _repo, number, task, _work_dir, *, token):  # noqa: ANN001, ANN202
+        store.set_status(task.id, DONE, summary="ok")
+        return worker.WorkResult(task_id=task.id, status=DONE, committed=True, usage=worker_usage)
+
+    monkeypatch.setattr(worker, "run_task", fake_run_task)
+
+    reviewer_called: list[str] = []
+
+    def fake_review_issue(*_a: object, **_kw: object) -> object:
+        reviewer_called.append("called")
+        return reviewer.ReviewResult(number=1, decision="open_pr")
+
+    monkeypatch.setattr(reviewer, "review_issue", fake_review_issue)
+
+    gh = _RecBuildGH()
+    report = orchestrator.RepoReport(slug=repo.slug)
+    tracker = DailySpendTracker(ws.state_dir)
+    cfg = Config.from_dict({"daily_budget_usd": 0.001})
+
+    orchestrator._run_build(gh, ws, cfg, repo, issue, "token", lambda _m: None, report, tracker=tracker)
+
+    # Reviewer must NOT have been called.
+    assert reviewer_called == [], "reviewer was called despite budget exhaustion"
+
+    # A "budget-exceeded" action was appended (from the mid-build or post-worker budget check).
+    budget_actions = [a for a in report.actions if "budget-exceeded" in a]
+    assert len(budget_actions) >= 1
+
+    assert report.budget_exhausted is True
+
+
+def test_tick_report_budget_fields_populated(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """tick() populates daily_spend, daily_budget, and budget_exhausted on TickReport."""
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    monkeypatch.setenv("CHEAPHELP_AGENT_MOCK", "/dev/null")
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+
+    reg = Registry(ws.registry_path)
+    reg.add(RepoEntry(owner="octocat", name="hello", enabled=True))
+
+    class _NoIssuesGH:
+        def __enter__(self) -> _NoIssuesGH:
+            return self
+
+        def __exit__(self, *_exc: object) -> bool:
+            return False
+
+        def authenticated_login(self) -> str:
+            return "mybot"
+
+        def list_open_issues(self, _owner: str, _name: str) -> list[Issue]:
+            return []
+
+    monkeypatch.setattr(orchestrator, "GitHubClient", lambda *_a, **_k: _NoIssuesGH())
+
+    ws.save_config(Config.from_dict({"daily_budget_usd": 2.0}))
+    report = orchestrator.tick(ws, log=lambda _m: None)
+
+    assert report.daily_budget == 2.0
+    assert report.daily_spend == 0.0
+    assert report.budget_exhausted is False
+
+
 def test_run_task_timeout_retries_then_escalates(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
