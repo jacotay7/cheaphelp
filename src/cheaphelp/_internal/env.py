@@ -63,7 +63,7 @@ def write_env_file(path: Path, values: dict[str, str]) -> None:
     """
     lines = [
         "# cheaphelp secrets - keep this file private. Do not commit it.",
-        "# GITHUB_TOKEN     : a GitHub personal access token (repo + issues scope).",
+        "# GITHUB_TOKEN     : a GitHub personal access token (repo + workflow + issues scope).",
         "# OPENROUTER_API_KEY: your OpenRouter API key.",
         "",
     ]

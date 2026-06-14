@@ -87,6 +87,39 @@ class ReviewResult:
     usage: UsageData | None = None
 
 
+def _route_push_failure_to_human(
+    gh: GitHubClient,
+    config: Config,
+    repo: RepoEntry,
+    number: int,
+    exc: Exception,
+) -> None:
+    """Label an issue ``needs-human`` after a non-retryable push failure.
+
+    Mirrors the blast-radius escape hatch: post an attributed comment with the
+    git error, add ``needs-human`` and drop ``planned``/``in-progress`` so the
+    orchestrator stops re-running the build (and re-crashing) on every tick.
+    """
+    body = (
+        "The implementation is complete, but pushing the branch to open a pull "
+        "request was rejected, so no PR could be opened. This usually needs a "
+        "human to fix the cause (for example, the GitHub token may be missing the "
+        "`workflow` scope required to push changes under `.github/workflows/`).\n\n"
+        f"```\n{str(exc).strip()}\n```"
+    )
+    gh.ensure_label(
+        repo.owner,
+        repo.name,
+        config.labels["needs_human"],
+        color="d93f0b",
+        description="cheaphelp: stuck; needs a human",
+    )
+    gh.add_labels(repo.owner, repo.name, number, [config.labels["needs_human"]])
+    gh.remove_label(repo.owner, repo.name, number, config.labels["planned"])
+    gh.remove_label(repo.owner, repo.name, number, config.labels["in_progress"])
+    gh.create_comment(repo.owner, repo.name, number, cheaphelp_message(body, "reviewer", config))
+
+
 def apply_review(
     gh: GitHubClient,
     workspace: Workspace,
@@ -109,8 +142,15 @@ def apply_review(
             # Inspection mode: don't touch the remote. Leave the issue as-is so a
             # later run (without the guard) actually opens the PR.
             return ReviewResult(number=number, decision="open_pr (skipped: NO_PUSH)", usage=usage)
-        # Make sure the branch is on the remote before opening the PR.
-        gitutil.push_branch(clone_dir, repo, branch=branch, token=token)
+        # Make sure the branch is on the remote before opening the PR. A push can
+        # be rejected for reasons a retry will never fix (e.g. the token lacks the
+        # `workflow` scope and the branch touches `.github/workflows/`). Route the
+        # issue to a human instead of crashing the build every tick.
+        try:
+            gitutil.push_branch(clone_dir, repo, branch=branch, token=token)
+        except Exception as exc:  # noqa: BLE001
+            _route_push_failure_to_human(gh, config, repo, number, exc)
+            return ReviewResult(number=number, decision="push_failed", error=str(exc), usage=usage)
         title = str(decision.get("pr_title") or f"cheaphelp: resolve #{number}").strip()
         body = str(decision.get("pr_body") or "").strip()
         reviewers = config.pr_reviewers or [repo.owner]

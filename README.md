@@ -65,7 +65,9 @@ pipeline behaves.
 - Python ≥ 3.10 (developed on 3.13)
 - [`uv`](https://docs.astral.sh/uv/)
 - [opencode](https://opencode.ai): `curl -fsSL https://opencode.ai/install | bash` (or `npm i -g opencode-ai`)
-- A GitHub personal access token (repo + issues scope) and an OpenRouter API key
+- A GitHub personal access token (repo + workflow + issues scope) and an OpenRouter API key
+  — the `workflow` scope is required so cheaphelp can push branches that touch
+  `.github/workflows/`; without it those pushes are rejected and the PR never opens
 
 ## Quick start
 
