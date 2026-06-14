@@ -209,6 +209,19 @@ def get_parser() -> argparse.ArgumentParser:
     p_sync.add_argument("--force", action="store_true", help="Overwrite workspace prompts.")
     p_sync.set_defaults(func=commands.cmd_agents_sync)
 
+    # config
+    p_config = subparsers.add_parser("config", help="View or change configuration settings.")
+    config_sub = p_config.add_subparsers(dest="config_command", metavar="<action>")
+    p_cfg_show = config_sub.add_parser("show", help="Print the effective configuration.")
+    p_cfg_show.set_defaults(func=commands.cmd_config_show)
+    p_cfg_get = config_sub.add_parser("get", help="Look up a single config value by dotted path.")
+    p_cfg_get.add_argument("key", help="Dotted path to a config key (e.g. models.worker).")
+    p_cfg_get.set_defaults(func=commands.cmd_config_get)
+    p_cfg_set = config_sub.add_parser("set", help="Set a config value by dotted path.")
+    p_cfg_set.add_argument("key", help="Dotted path to a config key (e.g. agent_timeout).")
+    p_cfg_set.add_argument("value", help="New value for the config key.")
+    p_cfg_set.set_defaults(func=commands.cmd_config_set)
+
     # doctor
     subparsers.add_parser("doctor", help="Check workspace, tokens and opencode.").set_defaults(
         func=commands.cmd_doctor,

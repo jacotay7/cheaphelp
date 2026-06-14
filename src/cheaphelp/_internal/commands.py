@@ -15,6 +15,7 @@ import sys
 import time
 from dataclasses import asdict
 from pathlib import Path
+from typing import Any
 
 from cheaphelp._internal import cleanup, opencode, systemd
 from cheaphelp._internal.config import Config, Workspace
@@ -557,3 +558,191 @@ def cmd_logs(args: argparse.Namespace) -> int:
 
 def add_config_overrides(config: Config) -> None:  # pragma: no cover - reserved
     """Placeholder for future per-invocation config overrides."""
+
+
+# --- config ------------------------------------------------------------------
+_CONFIG_SCALAR_KEYS: dict[str, type] = {
+    "version": int,
+    "poll_interval": str,
+    "opencode_bin": str,
+    "agent_timeout": float,
+    "max_issues_per_tick": int,
+    "max_tasks_per_tick": int,
+    "max_task_attempts": int,
+    "prune_work_clones": bool,
+}
+
+_CONFIG_DICT_KEYS: dict[str, dict[str, type]] = {
+    "models": {"responder": str, "planner": str, "worker": str, "reviewer": str},
+    "variants": {"responder": str, "planner": str, "worker": str, "reviewer": str},
+}
+
+_OPENSCODE_AFFECTED: set[str] = {"models", "variants"}
+
+
+def _validate_known_path(path: str) -> tuple[str, str | None, type]:
+    """Validate a dotted config path and return ``(top_key, sub_key, py_type)``.
+
+    Raises:
+        ValueError: If the path is unknown.
+    """
+    parts = path.split(".", 1) if "." in path else (path, None)
+    top = parts[0]
+    # Check scalar keys first (no sub-key allowed).
+    if top in _CONFIG_SCALAR_KEYS:
+        if parts[1] is not None:
+            raise ValueError(f"Unknown config key: {path}")
+        return top, None, _CONFIG_SCALAR_KEYS[top]
+
+    # Check dict keys.
+    if top in _CONFIG_DICT_KEYS:
+        if parts[1] is None:
+            raise ValueError(f"Unknown config key: {path}")
+        sub = parts[1]
+        # Reject deeper nesting (dotted path within a dict sub-key).
+        if "." in sub:
+            raise ValueError(f"Unknown config key: {path}")
+        sub_types = _CONFIG_DICT_KEYS[top]
+        if sub not in sub_types:
+            raise ValueError(f"Unknown config key: {path}")
+        return top, sub, sub_types[sub]
+
+    raise ValueError(f"Unknown config key: {top}")
+
+
+def _coerce(raw: str, py_type: type) -> Any:
+    """Parse *raw* into *py_type*, raising ``ValueError`` on failure."""
+    if py_type is bool:
+        lower = raw.lower()
+        if lower in ("true", "1"):
+            return True
+        if lower in ("false", "0"):
+            return False
+        raise ValueError(f"Expected bool, got {raw!r}")
+    if py_type is int:
+        try:
+            return int(raw)
+        except ValueError:
+            raise ValueError(f"Expected int, got {raw!r}") from None
+    if py_type is float:
+        try:
+            return float(raw)
+        except ValueError:
+            raise ValueError(f"Expected float, got {raw!r}") from None
+    if py_type is str:
+        return raw
+    raise ValueError(f"Expected {py_type.__name__}, got {raw!r}")
+
+
+def _load_raw_overrides(ws: Workspace) -> dict:
+    """Read the raw JSON from *ws.config_path*, or return ``{}``."""
+    if not ws.config_path.exists():
+        return {}
+    return json.loads(ws.config_path.read_text(encoding="utf-8"))
+
+
+def _format_value(value: Any, py_type: type) -> str:
+    """Format *value* for display according to *py_type*."""
+    if py_type is str:
+        return repr(value)
+    if py_type is float:
+        # Always use str() so e.g. 600.0 prints as "600.0".
+        return str(value)
+    if py_type is bool:
+        return str(value).lower()
+    # int and others
+    return str(value)
+
+
+def cmd_config_show(args: argparse.Namespace) -> int:
+    """Print the effective configuration."""
+    ws = _workspace(args)
+    if (rc := _require_workspace(ws)) is not None:
+        return rc
+
+    config = ws.load_config()
+    raw = _load_raw_overrides(ws)
+    config_dict = config.to_dict()
+
+    print(f"# {ws.config_path}")
+
+    # Scalars.
+    for key, py_type in _CONFIG_SCALAR_KEYS.items():
+        value = getattr(config, key)
+        suffix = ""
+        if key not in raw:
+            suffix = "  (default)"
+        print(f"  {key}: {_format_value(value, py_type)}  ({py_type.__name__}){suffix}")
+
+    # Dict sections.
+    for top, sub_types in _CONFIG_DICT_KEYS.items():
+        print()
+        print(f"  {top}:")
+        raw_top = raw.get(top, {}) if isinstance(raw.get(top), dict) else {}
+        for sub_key, py_type in sub_types.items():
+            value = config_dict[top][sub_key]
+            suffix = ""
+            if sub_key not in raw_top:
+                suffix = "  (default)"
+            print(f"    {sub_key}: {_format_value(value, py_type)}{suffix}")
+
+    # pr_reviewers (read-only, not configurable via set).
+    print()
+    print(f"  pr_reviewers: {config_dict.get('pr_reviewers', [])}")
+
+    return 0
+
+
+def cmd_config_get(args: argparse.Namespace) -> int:
+    """Look up a single config value by dotted path."""
+    ws = _workspace(args)
+    if (rc := _require_workspace(ws)) is not None:
+        return rc
+
+    config = ws.load_config()
+
+    try:
+        top, sub, py_type = _validate_known_path(args.key)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+    value = getattr(config, top) if sub is None else getattr(config, top)[sub]
+
+    print(_format_value(value, py_type))
+    return 0
+
+
+def cmd_config_set(args: argparse.Namespace) -> int:
+    """Set a config value by dotted path."""
+    ws = _workspace(args)
+    if (rc := _require_workspace(ws)) is not None:
+        return rc
+
+    try:
+        top, sub, py_type = _validate_known_path(args.key)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+    try:
+        coerced = _coerce(args.value, py_type)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+    config = ws.load_config()
+
+    if sub is None:
+        setattr(config, top, coerced)
+    else:
+        getattr(config, top)[sub] = coerced
+
+    ws.save_config(config)
+
+    if top in _OPENSCODE_AFFECTED:
+        path = opencode.write_opencode_config(ws, config)
+        print(f"Regenerated {path}")
+
+    print(f"Set {args.key} = {_format_value(coerced, py_type)}")
+    return 0
