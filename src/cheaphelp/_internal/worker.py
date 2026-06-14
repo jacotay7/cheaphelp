@@ -14,6 +14,8 @@ from pathlib import Path
 
 from cheaphelp._internal import gitutil, opencode
 from cheaphelp._internal.config import Config, Workspace
+from cheaphelp._internal.conventions import read_conventions
+from cheaphelp._internal.opencode import UsageData
 from cheaphelp._internal.registry import RepoEntry
 from cheaphelp._internal.tasks import BLOCKED, DONE, PENDING, Task, TaskStore
 
@@ -25,7 +27,7 @@ def branch_name(number: int) -> str:
     return f"cheaphelp/issue-{number}"
 
 
-def build_prompt(task: Task, issue_md: str) -> str:
+def build_prompt(task: Task, issue_md: str, *, conventions: str = "") -> str:
     """Render the worker's user message for a single task.
 
     The worker implements and lightly verifies one task; it does NOT run the
@@ -34,24 +36,32 @@ def build_prompt(task: Task, issue_md: str) -> str:
     (and possibly expensive, e.g. multi-version) check is not repeated after
     every task.
     """
-    return "\n".join(
-        [
-            "You are implementing ONE task that is part of a larger issue.",
+    lines = [
+        "You are implementing ONE task that is part of a larger issue.",
+        "",
+        "## Issue context (for background only — do not implement the whole issue)",
+        "",
+        issue_md.strip() or "_(no spec)_",
+        "",
+        "## Your task",
+        "",
+        task.to_markdown(),
+    ]
+    if conventions.strip():
+        lines += [
             "",
-            "## Issue context (for background only — do not implement the whole issue)",
+            "## Repository conventions",
             "",
-            issue_md.strip() or "_(no spec)_",
-            "",
-            "## Your task",
-            "",
-            task.to_markdown(),
-            "",
-            "---",
-            "",
-            "Implement this task in the working directory, verify it, then report "
-            "following your output protocol (a single json block).",
-        ],
-    )
+            conventions.rstrip(),
+        ]
+    lines += [
+        "",
+        "---",
+        "",
+        "Implement this task in the working directory, verify it, then report "
+        "following your output protocol (a single json block).",
+    ]
+    return "\n".join(lines)
 
 
 @dataclass
@@ -62,6 +72,7 @@ class WorkResult:
     status: str
     committed: bool = False
     error: str | None = None
+    usage: UsageData | None = None
 
 
 def run_task(
@@ -80,9 +91,12 @@ def run_task(
     issue_md = issue_md_path.read_text(encoding="utf-8") if issue_md_path.exists() else ""
 
     store.set_status(task.id, "in_progress")
-    prompt = build_prompt(task, issue_md)
+    conventions = read_conventions(clone_dir)
+    prompt = build_prompt(task, issue_md, conventions=conventions)
+    usage: UsageData | None = None
     try:
         result = opencode.run_agent(workspace, config, "worker", prompt, cwd=clone_dir, timeout=config.agent_timeout)
+        usage = result.usage
     except subprocess.TimeoutExpired:
         # A timeout is retryable: reset to pending and let the next tick try
         # again, escalating to blocked (-> needs-human) only after the limit.
@@ -117,4 +131,4 @@ def run_task(
     else:
         store.set_status(task.id, BLOCKED, summary=full_summary or "(blocked, no summary)")
 
-    return WorkResult(task_id=task.id, status=status or BLOCKED, committed=committed)
+    return WorkResult(task_id=task.id, status=status or BLOCKED, committed=committed, usage=usage)

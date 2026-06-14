@@ -2,15 +2,22 @@
 
 from __future__ import annotations
 
+import json
 import os
+import random
+from collections.abc import Callable
 from pathlib import Path
+from typing import cast
+from unittest.mock import patch
 
+import httpx
 import pytest
 
-from cheaphelp._internal import cleanup, gitutil, opencode, orchestrator, planner, systemd, worker
+from cheaphelp._internal import cleanup, gitutil, opencode, orchestrator, planner, responder, reviewer, systemd, worker
 from cheaphelp._internal.config import DEFAULT_AGENT_TIMEOUT, DEFAULT_MODELS, Config, Workspace
+from cheaphelp._internal.conventions import CONVENTIONS_FILES, read_conventions
 from cheaphelp._internal.env import parse_env, read_env_file, update_env_file
-from cheaphelp._internal.github import Comment, Issue
+from cheaphelp._internal.github import Comment, GitHubClient, GitHubError, Issue
 from cheaphelp._internal.lock import RunLock
 from cheaphelp._internal.orchestrator import _process_repo, _short_exc, classify, parse_depends_on
 from cheaphelp._internal.registry import Registry, RepoEntry, parse_slug
@@ -23,7 +30,7 @@ from cheaphelp._internal.responder import (
     is_bot_comment,
     needs_turn,
 )
-from cheaphelp._internal.tasks import BLOCKED, DONE, PENDING, TaskStore
+from cheaphelp._internal.tasks import BLOCKED, DONE, PENDING, IssueCostStore, Task, TaskStore
 
 
 # --- config / workspace ----------------------------------------------------
@@ -97,6 +104,224 @@ def test_prune_work_clones_default_and_roundtrip() -> None:
     cfg = Config.from_dict({"prune_work_clones": False})
     assert cfg.prune_work_clones is False
     assert Config.from_dict(cfg.to_dict()).prune_work_clones is False
+
+
+def test_retry_attempts_default_and_roundtrip() -> None:
+    # Default when constructed with no args / absent from the on-disk dict.
+    assert Config().retry_attempts == 3
+    assert Config.from_dict({}).retry_attempts == 3
+    # User override is honoured by from_dict and preserved by to_dict.
+    cfg = Config.from_dict({"retry_attempts": 5})
+    assert cfg.retry_attempts == 5
+    assert Config.from_dict(cfg.to_dict()).retry_attempts == 5
+    # String values are coerced via int(...).
+    assert Config.from_dict({"retry_attempts": "4"}).retry_attempts == 4
+
+
+def test_retry_base_delay_default_and_roundtrip() -> None:
+    # Default when constructed with no args / absent from the on-disk dict.
+    assert Config().retry_base_delay == 1.0
+    assert Config.from_dict({}).retry_base_delay == 1.0
+    # User override is honoured by from_dict and preserved by to_dict.
+    cfg = Config.from_dict({"retry_base_delay": 2.5})
+    assert cfg.retry_base_delay == 2.5
+    assert Config.from_dict(cfg.to_dict()).retry_base_delay == 2.5
+    # String values are coerced via float(...).
+    assert Config.from_dict({"retry_base_delay": "0.5"}).retry_base_delay == 0.5
+
+
+def _make_github_client(
+    handler: Callable[[httpx.Request], httpx.Response],
+    *,
+    root: str = "https://api.github.com",
+    timeout: float = 30.0,
+    retry_attempts: int = 3,
+    retry_base_delay: float = 1.0,
+) -> GitHubClient:
+    """Build a GitHubClient wired to an httpx.MockTransport (no network)."""
+    client = httpx.Client(base_url=root, transport=httpx.MockTransport(handler))
+    return GitHubClient(
+        "test-token",
+        root=root,
+        timeout=timeout,
+        retry_attempts=retry_attempts,
+        retry_base_delay=retry_base_delay,
+        client=client,
+    )
+
+
+# --- GitHubClient retry tests -----------------------------------------------
+def _make_counting_handler() -> tuple[list[httpx.Response], Callable]:
+    """Return (responses, handler) — the handler pops from *responses* each call.
+
+    Pop an ``httpx.Response`` to return, or raise the item if it is an exception class.
+    """
+    items: list[httpx.Response] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return items.pop(0)
+
+    return items, handler
+
+
+def test_request_retries_on_5xx_then_succeeds() -> None:
+    items, handler = _make_counting_handler()
+    items.append(httpx.Response(503))
+    items.append(httpx.Response(503))
+    items.append(httpx.Response(200, json={"ok": True}))
+    gh = _make_github_client(handler, retry_attempts=3, retry_base_delay=0.01)
+    result = gh._request("GET", "/test")
+    assert result == {"ok": True}
+    assert len(items) == 0  # all consumed
+
+
+def test_request_retries_on_429_then_succeeds() -> None:
+    items, handler = _make_counting_handler()
+    items.append(httpx.Response(429))
+    items.append(httpx.Response(429))
+    items.append(httpx.Response(200, json={"ok": True}))
+    gh = _make_github_client(handler, retry_attempts=3, retry_base_delay=0.01)
+    result = gh._request("GET", "/test")
+    assert result == {"ok": True}
+    assert len(items) == 0
+
+
+def test_request_does_not_retry_on_404() -> None:
+    items, handler = _make_counting_handler()
+    items.append(httpx.Response(404))
+    gh = _make_github_client(handler, retry_attempts=3, retry_base_delay=0.01)
+    with pytest.raises(GitHubError) as exc_info:
+        gh._request("GET", "/test")
+    assert "404" in str(exc_info.value)
+    assert len(items) == 0
+
+
+def test_request_does_not_retry_on_422() -> None:
+    items, handler = _make_counting_handler()
+    items.append(httpx.Response(422))
+    gh = _make_github_client(handler, retry_attempts=3, retry_base_delay=0.01)
+    with pytest.raises(GitHubError) as exc_info:
+        gh._request("GET", "/test")
+    assert "422" in str(exc_info.value)
+    assert len(items) == 0
+
+
+def test_request_retries_on_connect_error() -> None:
+    calls: list[int] = []
+
+    def handler_connect(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        if len(calls) < 3:
+            raise httpx.ConnectError("connection refused")
+        return httpx.Response(200, json={"ok": True})
+
+    gh = _make_github_client(handler_connect, retry_attempts=3, retry_base_delay=0.01)
+    result = gh._request("GET", "/test")
+    assert result == {"ok": True}
+    assert len(calls) == 3
+
+
+def test_request_exhausted_retries_raises_last_error() -> None:
+    items, handler = _make_counting_handler()
+    for _ in range(4):  # one more than needed
+        items.append(httpx.Response(503))
+    gh = _make_github_client(handler, retry_attempts=3, retry_base_delay=0.01)
+    with pytest.raises(GitHubError) as exc_info:
+        gh._request("GET", "/test")
+    assert "503" in str(exc_info.value)
+
+
+def test_request_exhausted_transport_raises_last_error() -> None:
+    calls: list[int] = []
+
+    def handler_timeout(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        raise httpx.ReadTimeout("timed out")
+
+    gh = _make_github_client(handler_timeout, retry_attempts=3, retry_base_delay=0.01)
+    with pytest.raises(httpx.ReadTimeout):
+        gh._request("GET", "/test")
+    assert len(calls) == 3
+
+
+def test_request_honors_retry_after() -> None:
+    sleeps: list[float] = []
+
+    def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    items, handler = _make_counting_handler()
+    items.append(httpx.Response(429, headers={"Retry-After": "5"}))
+    items.append(httpx.Response(200, json={"ok": True}))
+    gh = _make_github_client(handler, retry_attempts=3, retry_base_delay=0.0)
+
+    with patch("time.sleep", fake_sleep):
+        result = gh._request("GET", "/test")
+    assert result == {"ok": True}
+    assert len(sleeps) == 1
+    assert sleeps[0] >= 5.0
+
+
+def test_request_honors_retry_after_caps_at_60() -> None:
+    from unittest.mock import patch  # noqa: PLC0415
+
+    sleeps: list[float] = []
+
+    def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    items, handler = _make_counting_handler()
+    items.append(httpx.Response(429, headers={"Retry-After": "999"}))
+    items.append(httpx.Response(200, json={"ok": True}))
+    gh = _make_github_client(handler, retry_attempts=3, retry_base_delay=0.0)
+
+    with patch("time.sleep", fake_sleep):
+        result = gh._request("GET", "/test")
+    assert result == {"ok": True}
+    assert len(sleeps) == 1
+    assert sleeps[0] <= 60.0
+
+
+def test_request_no_sleep_on_last_attempt() -> None:
+    from unittest.mock import patch  # noqa: PLC0415
+
+    sleeps: list[float] = []
+
+    def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    items, handler = _make_counting_handler()
+    for _ in range(3):
+        items.append(httpx.Response(503))
+    gh = _make_github_client(handler, retry_attempts=3, retry_base_delay=0.01)
+
+    with patch("time.sleep", fake_sleep), pytest.raises(GitHubError):
+        gh._request("GET", "/test")
+    assert len(sleeps) == 2  # retry_attempts - 1
+
+
+def test_request_backoff_is_exponential() -> None:
+    from unittest.mock import patch  # noqa: PLC0415
+
+    random.seed(42)  # deterministic jitter
+    sleeps: list[float] = []
+
+    def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    items, handler = _make_counting_handler()
+    for _ in range(3):
+        items.append(httpx.Response(503))
+    gh = _make_github_client(handler, retry_attempts=3, retry_base_delay=1.0)
+
+    with patch("time.sleep", fake_sleep), pytest.raises(GitHubError):
+        gh._request("GET", "/test")
+    assert len(sleeps) == 2
+
+    # Attempt 1: base * 2^(0) = 1.0, jitter ±0.25
+    assert 0.75 <= sleeps[0] <= 1.25
+    # Attempt 2: base * 2^(1) = 2.0, jitter ±0.5
+    assert 1.5 <= sleeps[1] <= 2.5
 
 
 def _make_clone(ws: Workspace, name: str) -> Path:
@@ -275,6 +500,113 @@ def test_process_repo_skips_locked_issue(
     assert report.issues_considered == 1
     assert report.issues_skipped == 1
     assert report.turns_taken == 0
+
+
+class _AdvancedUnderLockGH:
+    """list_open_issues shows a responder issue, but get_issue shows it already advanced.
+
+    Simulates an overlapping tick finalizing the issue between our classification and
+    our acquiring its lock (the #57 race).
+    """
+
+    def __init__(self, ready_label: str) -> None:
+        self._ready = ready_label
+
+    def list_open_issues(self, _owner: str, _name: str) -> list[Issue]:
+        return [Issue(number=1, title="t", body="b", state="open", labels=[], user="human", html_url="")]
+
+    def list_issue_comments(self, _owner: str, _name: str, _number: int) -> list[Comment]:
+        return []
+
+    def get_issue(self, _owner: str, _name: str, _number: int) -> Issue:
+        return Issue(number=1, title="t", body="b", state="open", labels=[self._ready], user="human", html_url="")
+
+    def authenticated_login(self) -> str:
+        return "mybot"
+
+
+def test_process_repo_reclassifies_under_lock_and_skips_when_advanced(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    monkeypatch.setenv("CHEAPHELP_AGENT_MOCK", "/dev/null")  # _is_mock(): no clone
+    repo = RepoEntry(owner="octocat", name="hello")
+    gh = _AdvancedUnderLockGH(Config().labels["ready"])
+
+    report = _process_repo(
+        gh,  # ty: ignore[invalid-argument-type]
+        ws,
+        Config(),
+        repo,
+        "mybot",
+        "token",
+        dry_run=False,
+        log=lambda _m: None,
+    )
+    # Classified as responder, but the under-lock re-check sees it is now `ready`
+    # (stage "planner"), so it is skipped without running the responder.
+    assert report.issues_considered == 1
+    assert report.issues_skipped == 1
+    assert report.turns_taken == 0
+    assert any("already planner" in a for a in report.actions)
+
+
+class _RecordingResponderGH:
+    """Stays at the responder stage on re-check; records any comment posted."""
+
+    def __init__(self) -> None:
+        self.comments: list[tuple[int, str]] = []
+
+    def _issue(self) -> Issue:
+        return Issue(number=1, title="t", body="b", state="open", labels=[], user="human", html_url="")
+
+    def list_open_issues(self, _owner: str, _name: str) -> list[Issue]:
+        return [self._issue()]
+
+    def list_issue_comments(self, _owner: str, _name: str, _number: int) -> list[Comment]:
+        return []
+
+    def get_issue(self, _owner: str, _name: str, _number: int) -> Issue:
+        return self._issue()
+
+    def create_comment(self, _owner: str, _name: str, number: int, body: str) -> Comment:
+        self.comments.append((number, body))
+        return Comment(id=1, body=body, user="mybot", created_at="")
+
+    def authenticated_login(self) -> str:
+        return "mybot"
+
+
+def test_process_repo_proceeds_when_stage_unchanged_under_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    decision = tmp_path / "decision.json"
+    decision.write_text(
+        '```json\n{"action": "comment", "reply": "one question?", "issue_md": ""}\n```',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CHEAPHELP_AGENT_MOCK", str(decision))
+    repo = RepoEntry(owner="octocat", name="hello")
+    gh = _RecordingResponderGH()
+
+    report = _process_repo(
+        gh,  # ty: ignore[invalid-argument-type]
+        ws,
+        Config(),
+        repo,
+        "mybot",
+        "token",
+        dry_run=False,
+        log=lambda _m: None,
+    )
+    # Stage is unchanged on re-check, so the responder runs and posts its comment.
+    assert report.turns_taken == 1
+    assert [n for n, _ in gh.comments] == [1]
 
 
 def test_parse_depends_on() -> None:
@@ -548,6 +880,8 @@ def test_build_prompt_includes_thread() -> None:
     assert "Issue #42" in prompt
     assert "@alice" in prompt
     assert "hi" in prompt
+    # Back-compat: omitted conventions kwarg does not emit a section.
+    assert "## Repository conventions" not in prompt
 
 
 def test_attribution_header_names_agent_and_model() -> None:
@@ -579,6 +913,68 @@ def test_build_prompt_strips_attribution_header_from_thread() -> None:
     assert ATTRIBUTION_PREFIX not in prompt
     assert BOT_MARKER not in prompt
     assert "an earlier question" in prompt
+
+
+# --- conventions injection into build_prompt --------------------------------
+
+
+def test_responder_build_prompt_with_conventions() -> None:
+    prompt = build_prompt(
+        _issue(number=1),
+        [_comment("hello", "alice")],
+        "mybot",
+        conventions="house rules: no emoji",
+    )
+    assert "## Repository conventions" in prompt
+    assert "house rules: no emoji" in prompt
+
+
+def test_planner_build_prompt_with_conventions() -> None:
+    prompt = planner.build_prompt("spec body", conventions="house rules: no emoji")
+    assert "## Repository conventions" in prompt
+    assert "house rules: no emoji" in prompt
+
+
+def test_worker_build_prompt_with_conventions() -> None:
+    prompt = worker.build_prompt(
+        Task(id="t1", title="Do the thing"),
+        "spec body",
+        conventions="house rules: no emoji",
+    )
+    assert "## Repository conventions" in prompt
+    assert "house rules: no emoji" in prompt
+
+
+def test_reviewer_build_prompt_with_conventions() -> None:
+    prompt = reviewer.build_prompt(
+        "spec",
+        "M file.py",
+        "diff --git a/file.py b/file.py",
+        "### t1: done\nok",
+        conventions="house rules: no emoji",
+    )
+    assert "## Repository conventions" in prompt
+    assert "house rules: no emoji" in prompt
+
+
+def test_planner_build_prompt_no_conventions_by_default() -> None:
+    prompt = planner.build_prompt("spec body")
+    assert "## Repository conventions" not in prompt
+
+
+def test_worker_build_prompt_no_conventions_by_default() -> None:
+    prompt = worker.build_prompt(Task(id="t1", title="x"), "spec")
+    assert "## Repository conventions" not in prompt
+
+
+def test_reviewer_build_prompt_no_conventions_by_default() -> None:
+    prompt = reviewer.build_prompt("spec", "M f.py", "diff", "summary")
+    assert "## Repository conventions" not in prompt
+
+
+def test_build_prompt_conventions_whitespace_only() -> None:
+    prompt = build_prompt(_issue(), [], "bot", conventions="   ")
+    assert "## Repository conventions" not in prompt
 
 
 # --- opencode --------------------------------------------------------------
@@ -647,6 +1043,349 @@ def test_run_agent_no_reprompt_when_decision_present(
     assert len(calls) == 1  # no retry needed
 
 
+def test_run_agent_retries_on_nonzero_exit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    monkeypatch.setattr(opencode, "find_opencode", lambda _cfg: Path("opencode"))
+
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **_kwargs: object) -> object:
+        calls.append(cmd)
+        if len(calls) <= 2:
+            return SimpleNamespace(returncode=1, stdout="", stderr="boom")
+        return SimpleNamespace(returncode=0, stdout='```json\n{"status": "done"}\n```', stderr="")
+
+    monkeypatch.setattr(opencode.subprocess, "run", fake_run)
+    cfg = Config.from_dict({"retry_base_delay": 0.01})
+
+    result = opencode.run_agent(ws, cfg, "worker", "do it", cwd=tmp_path)
+    assert result.decision == {"status": "done"}
+    assert len(calls) == 3
+
+
+def test_run_agent_retries_on_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import subprocess  # noqa: PLC0415
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    monkeypatch.setattr(opencode, "find_opencode", lambda _cfg: Path("opencode"))
+
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **_kwargs: object) -> object:
+        calls.append(cmd)
+        if len(calls) <= 2:
+            raise subprocess.TimeoutExpired(cmd="opencode", timeout=1.0)
+        return SimpleNamespace(returncode=0, stdout='```json\n{"status": "done"}\n```', stderr="")
+
+    monkeypatch.setattr(opencode.subprocess, "run", fake_run)
+    cfg = Config.from_dict({"retry_base_delay": 0.01})
+
+    result = opencode.run_agent(ws, cfg, "worker", "do it", cwd=tmp_path)
+    assert result.decision == {"status": "done"}
+    assert len(calls) == 3
+
+
+def test_run_agent_exhausted_retries_returns_last_nonzero(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    monkeypatch.setattr(opencode, "find_opencode", lambda _cfg: Path("opencode"))
+
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **_kwargs: object) -> object:
+        calls.append(cmd)
+        return SimpleNamespace(returncode=2, stdout="", stderr="no good")
+
+    monkeypatch.setattr(opencode.subprocess, "run", fake_run)
+    cfg = Config.from_dict({"retry_base_delay": 0.01, "retry_attempts": 3})
+
+    result = opencode.run_agent(ws, cfg, "worker", "do it", cwd=tmp_path)
+    assert result.returncode == 2
+    assert result.ok is False
+    assert len(calls) == 3
+
+
+def test_run_agent_exhausted_timeout_raises(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import subprocess  # noqa: PLC0415
+
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    monkeypatch.setattr(opencode, "find_opencode", lambda _cfg: Path("opencode"))
+
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **_kwargs: object) -> object:
+        calls.append(cmd)
+        raise subprocess.TimeoutExpired(cmd="opencode", timeout=1.0)
+
+    monkeypatch.setattr(opencode.subprocess, "run", fake_run)
+    cfg = Config.from_dict({"retry_base_delay": 0.01, "retry_attempts": 3})
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        opencode.run_agent(ws, cfg, "worker", "do it", cwd=tmp_path)
+    assert len(calls) == 3
+
+
+def test_run_agent_no_retry_on_clean_exit_with_decision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    monkeypatch.setattr(opencode, "find_opencode", lambda _cfg: Path("opencode"))
+
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **_kwargs: object) -> object:
+        calls.append(cmd)
+        return SimpleNamespace(returncode=0, stdout='```json\n{"status": "done"}\n```', stderr="")
+
+    monkeypatch.setattr(opencode.subprocess, "run", fake_run)
+
+    result = opencode.run_agent(ws, Config(), "worker", "do it", cwd=tmp_path)
+    assert result.decision == {"status": "done"}
+    assert len(calls) == 1  # no retry, no re-prompt
+
+
+def test_run_agent_reprompt_does_not_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    monkeypatch.setattr(opencode, "find_opencode", lambda _cfg: Path("opencode"))
+
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **_kwargs: object) -> object:
+        calls.append(cmd)
+        stdout = "thinking out loud, no json" if len(calls) == 1 else '```json\n{"status": "done"}\n```'
+        return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(opencode.subprocess, "run", fake_run)
+
+    result = opencode.run_agent(ws, Config(), "worker", "do it", cwd=tmp_path)
+    assert result.decision == {"status": "done"}
+    assert len(calls) == 2  # re-prompt, not retry loop
+
+
+def test_run_agent_backoff_is_exponential(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import random  # noqa: PLC0415
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    random.seed(42)  # deterministic jitter
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    monkeypatch.setattr(opencode, "find_opencode", lambda _cfg: Path("opencode"))
+
+    calls: list[list[str]] = []
+    sleeps: list[float] = []
+
+    def fake_run(cmd: list[str], **_kwargs: object) -> object:
+        calls.append(cmd)
+        return SimpleNamespace(returncode=1, stdout="", stderr="boom")
+
+    def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr(opencode.subprocess, "run", fake_run)
+    monkeypatch.setattr(opencode.time, "sleep", fake_sleep)
+    cfg = Config.from_dict({"retry_base_delay": 1.0, "retry_attempts": 3})
+
+    result = opencode.run_agent(ws, cfg, "worker", "do it", cwd=tmp_path)
+    assert result.returncode == 1
+    assert len(calls) == 3
+    assert len(sleeps) == 2
+
+    # Attempt 1: base * 2^(0) = 1.0, jitter ±0.25
+    assert 0.75 <= sleeps[0] <= 1.25
+    # Attempt 2: base * 2^(1) = 2.0, jitter ±0.5
+    assert 1.5 <= sleeps[1] <= 2.5
+
+
+# --- UsageData --------------------------------------------------------------
+def test_usage_data_defaults() -> None:
+    u = opencode.UsageData()
+    assert u.prompt_tokens == 0
+    assert u.completion_tokens == 0
+    assert u.total_tokens == 0
+    assert u.cost_usd == 0.0
+
+
+def test_usage_data_addition() -> None:
+    a = opencode.UsageData(prompt_tokens=10, completion_tokens=20, total_tokens=30, cost_usd=0.001)
+    b = opencode.UsageData(prompt_tokens=100, completion_tokens=200, total_tokens=300, cost_usd=0.01)
+    c = a + b
+    assert c.prompt_tokens == 110
+    assert c.completion_tokens == 220
+    assert c.total_tokens == 330
+    assert c.cost_usd == 0.011
+    # Original objects unchanged.
+    assert a.prompt_tokens == 10
+    assert b.prompt_tokens == 100
+
+
+def test_usage_data_iadd() -> None:
+    a = opencode.UsageData(prompt_tokens=10, completion_tokens=20, total_tokens=30, cost_usd=0.001)
+    b = opencode.UsageData(prompt_tokens=100, completion_tokens=200, total_tokens=300, cost_usd=0.01)
+    result = a.__iadd__(b)
+    assert result is a  # returns self
+    assert a.prompt_tokens == 110
+    assert a.completion_tokens == 220
+    assert a.total_tokens == 330
+    assert a.cost_usd == 0.011
+
+
+def test_usage_data_to_dict_roundtrip() -> None:
+    u = opencode.UsageData(prompt_tokens=10, completion_tokens=20, total_tokens=30, cost_usd=0.001)
+    d = u.to_dict()
+    assert d == {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30, "cost_usd": 0.001}
+    restored = opencode.UsageData.from_dict(d)
+    assert restored == u
+
+
+def test_usage_data_from_dict_accepts_cost_key() -> None:
+    # OpenRouter returns "cost" in the usage payload; accept it as cost_usd.
+    u = opencode.UsageData.from_dict({"prompt_tokens": 10, "completion_tokens": 20, "cost": 0.005})
+    assert u.prompt_tokens == 10
+    assert u.completion_tokens == 20
+    assert u.cost_usd == 0.005
+    # cost_usd key takes precedence over cost when both are present.
+    u2 = opencode.UsageData.from_dict({"prompt_tokens": 1, "cost": 0.01, "cost_usd": 0.02})
+    assert u2.cost_usd == 0.02
+
+
+def test_usage_data_from_dict_coerces_types() -> None:
+    u = opencode.UsageData.from_dict({"prompt_tokens": "10", "completion_tokens": "20", "cost": "0.005"})
+    assert u.prompt_tokens == 10
+    assert u.completion_tokens == 20
+    assert u.cost_usd == 0.005
+
+
+def test_usage_data_from_dict_empty() -> None:
+    u = opencode.UsageData.from_dict({})
+    assert u.prompt_tokens == 0
+    assert u.completion_tokens == 0
+    assert u.total_tokens == 0
+    assert u.cost_usd == 0.0
+
+
+# --- _parse_usage -----------------------------------------------------------
+def test_parse_usage_from_stderr() -> None:
+    usage = opencode._parse_usage("", '{"prompt_tokens": 10, "completion_tokens": 20, "cost": 0.001}')
+    assert usage is not None
+    assert usage.prompt_tokens == 10
+    assert usage.completion_tokens == 20
+    assert usage.cost_usd == 0.001
+
+
+def test_parse_usage_from_stdout_when_stderr_empty() -> None:
+    usage = opencode._parse_usage(
+        '{"prompt_tokens": 5, "completion_tokens": 15, "cost_usd": 0.002}',
+        "",
+    )
+    assert usage is not None
+    assert usage.prompt_tokens == 5
+    assert usage.completion_tokens == 15
+    assert usage.cost_usd == 0.002
+
+
+def test_parse_usage_nested_usage_key() -> None:
+    payload = '{"id": "xyz", "usage": {"prompt_tokens": 100, "completion_tokens": 50, "cost": 0.01}}'
+    usage = opencode._parse_usage("", payload)
+    assert usage is not None
+    assert usage.prompt_tokens == 100
+    assert usage.completion_tokens == 50
+    assert usage.cost_usd == 0.01
+
+
+def test_parse_usage_line_by_line_fallback() -> None:
+    # A mixed stderr with a JSON usage object on one line.
+    stderr = 'some log info\n{"prompt_tokens": 7, "completion_tokens": 3, "cost": 0.0005}\ndone'
+    usage = opencode._parse_usage("", stderr)
+    assert usage is not None
+    assert usage.prompt_tokens == 7
+    assert usage.completion_tokens == 3
+    assert usage.cost_usd == 0.0005
+
+
+def test_parse_usage_stderr_takes_precedence() -> None:
+    usage = opencode._parse_usage(
+        '{"prompt_tokens": 1, "completion_tokens": 1, "cost": 0.001}',
+        '{"prompt_tokens": 99, "completion_tokens": 99, "cost": 0.099}',
+    )
+    assert usage is not None
+    assert usage.prompt_tokens == 99  # stderr won
+    assert usage.completion_tokens == 99
+
+
+def test_parse_usage_returns_none_when_no_json() -> None:
+    assert opencode._parse_usage("just prose", "") is None
+    assert opencode._parse_usage("", "more prose") is None
+    assert opencode._parse_usage("", "") is None
+    assert opencode._parse_usage('noise\n```json\n{"status": "ok"}\n```', "") is None
+
+
+# --- run_agent usage population ---------------------------------------------
+def test_run_agent_populates_usage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    monkeypatch.setattr(opencode, "find_opencode", lambda _cfg: Path("opencode"))
+
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **_kwargs: object) -> object:
+        calls.append(cmd)
+        stderr = '{"prompt_tokens": 50, "completion_tokens": 30, "cost": 0.004}'
+        return SimpleNamespace(
+            returncode=0,
+            stdout='```json\n{"status": "done"}\n```',
+            stderr=stderr,
+        )
+
+    monkeypatch.setattr(opencode.subprocess, "run", fake_run)
+
+    result = opencode.run_agent(ws, Config(), "worker", "do it", cwd=tmp_path)
+    assert result.decision == {"status": "done"}
+    assert len(calls) == 1
+    assert result.usage is not None
+    assert result.usage.prompt_tokens == 50
+    assert result.usage.completion_tokens == 30
+    assert result.usage.cost_usd == 0.004
+
+
+# --- opencode config shape --------------------------------------------------
 def test_build_opencode_config_shape() -> None:
     doc = opencode.build_opencode_config(Config())
     assert doc["$schema"] == opencode.OPENCODE_SCHEMA
@@ -817,6 +1556,84 @@ def test_task_store_record_attempt(tmp_path: Path) -> None:
     assert store.load()[0].attempts == 2
 
 
+# --- issue cost store -------------------------------------------------------
+def test_issue_cost_store_load_missing_file_returns_zeros(tmp_path: Path) -> None:
+    store = IssueCostStore(tmp_path / "issue-1")
+    usage = store.load()
+    assert usage.prompt_tokens == 0
+    assert usage.completion_tokens == 0
+    assert usage.total_tokens == 0
+    assert usage.cost_usd == 0.0
+
+
+def test_issue_cost_store_add_returns_cumulative_total(tmp_path: Path) -> None:
+    store = IssueCostStore(tmp_path / "issue-2")
+    u1 = opencode.UsageData(prompt_tokens=10, completion_tokens=20, total_tokens=30, cost_usd=0.001)
+    total = store.add(u1)
+    assert total.prompt_tokens == 10
+    assert total.completion_tokens == 20
+    assert total.total_tokens == 30
+    assert total.cost_usd == 0.001
+    # Verify the file was written with the right shape.
+    assert (tmp_path / "issue-2" / "cost.json").exists()
+    data = json.loads((tmp_path / "issue-2" / "cost.json").read_text(encoding="utf-8"))
+    assert data == {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30, "cost_usd": 0.001}
+
+
+def test_issue_cost_store_accumulates_across_instances(tmp_path: Path) -> None:
+    """Two add() calls across separate IssueCostStore instances simulate restart."""
+    store1 = IssueCostStore(tmp_path / "issue-3")
+    store1.add(opencode.UsageData(prompt_tokens=5, completion_tokens=5, total_tokens=10, cost_usd=0.0005))
+
+    store2 = IssueCostStore(tmp_path / "issue-3")
+    total = store2.add(opencode.UsageData(prompt_tokens=10, completion_tokens=20, total_tokens=30, cost_usd=0.001))
+    assert total.prompt_tokens == 15
+    assert total.completion_tokens == 25
+    assert total.total_tokens == 40
+    assert total.cost_usd == 0.0015
+
+    # Verify persistence: a third instance reads back the cumulative total.
+    store3 = IssueCostStore(tmp_path / "issue-3")
+    loaded = store3.load()
+    assert loaded.prompt_tokens == 15
+    assert loaded.completion_tokens == 25
+    assert loaded.total_tokens == 40
+    assert loaded.cost_usd == 0.0015
+
+
+def test_issue_cost_store_corrupt_file_treated_as_zero(tmp_path: Path) -> None:
+    path = tmp_path / "issue-4" / "cost.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("not json", encoding="utf-8")
+    store = IssueCostStore(tmp_path / "issue-4")
+    usage = store.load()
+    assert usage.prompt_tokens == 0
+    assert usage.completion_tokens == 0
+    assert usage.total_tokens == 0
+    assert usage.cost_usd == 0.0
+
+    # Non-dict JSON is also treated as zero.
+    path.write_text("[]", encoding="utf-8")
+    usage = store.load()
+    assert usage.prompt_tokens == 0
+    assert usage.completion_tokens == 0
+    assert usage.total_tokens == 0
+    assert usage.cost_usd == 0.0
+
+
+def test_issue_cost_store_save_creates_parent_dir(tmp_path: Path) -> None:
+    """save() creates the parent directory when it does not exist."""
+    store = IssueCostStore(tmp_path / "a" / "b" / "issue-5")
+    usage = opencode.UsageData(prompt_tokens=1, completion_tokens=2, total_tokens=3, cost_usd=0.0001)
+    store.save(usage)
+    assert store.path.exists()
+    loaded = store.load()
+    assert loaded.prompt_tokens == 1
+    assert loaded.completion_tokens == 2
+    assert loaded.total_tokens == 3
+    assert loaded.cost_usd == 0.0001
+
+
 def test_run_task_timeout_retries_then_escalates(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -952,3 +1769,885 @@ def test_run_lock_releases_on_exit(tmp_path: Path) -> None:
 def test_run_lock_holder_pid(tmp_path: Path) -> None:
     with RunLock(tmp_path / "x.lock") as lock:
         assert lock.holder_pid == os.getpid()
+
+
+# --- parse_diff_stat -------------------------------------------------------
+def test_parse_diff_stat_plural_full() -> None:
+    """Full stat line with multiple files, insertions and deletions."""
+    result = gitutil.parse_diff_stat(
+        " src/foo.py | 4 ++--\n src/bar.py | 2 +\n 2 files changed, 3 insertions(+), 3 deletions(-)",
+    )
+    assert result == (2, 3, 3)
+
+
+def test_parse_diff_stat_singular_no_deletions() -> None:
+    """Singular forms: 1 file, 1 insertion, no deletions."""
+    result = gitutil.parse_diff_stat(" 1 file changed, 1 insertion(+)")
+    assert result == (1, 1, 0)
+
+
+def test_parse_diff_stat_singular_full() -> None:
+    """Singular forms: 1 file, 1 insertion, 1 deletion."""
+    result = gitutil.parse_diff_stat(" 1 file changed, 1 insertion(+), 1 deletion(-)")
+    assert result == (1, 1, 1)
+
+
+def test_parse_diff_stat_no_insertions() -> None:
+    """Only deletions present (no insertions segment)."""
+    result = gitutil.parse_diff_stat(" 3 files changed, 45 deletions(-)")
+    assert result == (3, 0, 45)
+
+
+def test_parse_diff_stat_empty() -> None:
+    """Empty string returns None."""
+    result = gitutil.parse_diff_stat("")
+    assert result is None
+
+
+def test_parse_diff_stat_garbage() -> None:
+    """Unrecognisable prose returns None."""
+    result = gitutil.parse_diff_stat("some prose, not a stat line")
+    assert result is None
+
+
+def test_parse_diff_stat_no_summary_line() -> None:
+    """File-level diff lines with no summary line return None."""
+    result = gitutil.parse_diff_stat(" src/foo.py | 4 ++--")
+    assert result is None
+
+
+# --- blast-radius guardrail ------------------------------------------------
+class _RecBuildGH:
+    """GitHub stand-in that records every label/comment call made during build."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, tuple[object, ...]]] = []
+
+    def ensure_label(self, *a: object, **_kwargs: object) -> None:
+        self.calls.append(("ensure_label", a))
+
+    def add_labels(self, *a: object, **_kwargs: object) -> None:
+        self.calls.append(("add_labels", a))
+
+    def remove_label(self, *a: object, **_kwargs: object) -> None:
+        self.calls.append(("remove_label", a))
+
+    def create_comment(self, *a: object, **_kwargs: object) -> None:
+        self.calls.append(("create_comment", a))
+
+
+def _blast_gh() -> _RecBuildGH:
+    """Return a fresh _RecBuildGH and a default config/repo for blast-radius tests."""
+    return _RecBuildGH()
+
+
+def test_check_blast_radius_within_limits_returns_true(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gh = _blast_gh()
+    repo = RepoEntry(owner="o", name="r")
+    monkeypatch.setattr(gitutil, "diff_stat", lambda _w, _r: (5, 10, 5))
+    report = orchestrator.RepoReport(slug=repo.slug)
+    result = orchestrator._check_blast_radius(gh, None, Config(), repo, 1, None, lambda _m: None, report)
+    assert result is True
+    assert gh.calls == []
+
+
+def test_check_blast_radius_files_exceeded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gh = _blast_gh()
+    repo = RepoEntry(owner="o", name="r")
+    config = Config()
+    monkeypatch.setattr(gitutil, "diff_stat", lambda _w, _r: (45, 10, 5))
+    report = orchestrator.RepoReport(slug=repo.slug)
+    result = orchestrator._check_blast_radius(gh, None, config, repo, 1, None, lambda _m: None, report)
+    assert result is False
+
+    # needs-human label was added.
+    add_labels_call = next(c for c in gh.calls if c[0] == "add_labels")
+    assert config.labels["needs_human"] in add_labels_call[1][-1]  # ty: ignore[unsupported-operator]
+
+    # in-progress was removed.
+    remove_label_call = next(c for c in gh.calls if c[0] == "remove_label")
+    assert config.labels["in_progress"] in remove_label_call[1]
+
+    # Comment body contains "45" and "blast-radius".
+    comment_call = next(c for c in gh.calls if c[0] == "create_comment")
+    body = comment_call[1][-1]
+    assert "45" in body  # ty: ignore[unsupported-operator]
+    assert "blast-radius" in body  # ty: ignore[unsupported-operator]
+
+
+def test_check_blast_radius_lines_exceeded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gh = _blast_gh()
+    repo = RepoEntry(owner="o", name="r")
+    config = Config()
+    monkeypatch.setattr(gitutil, "diff_stat", lambda _w, _r: (5, 800, 800))
+    report = orchestrator.RepoReport(slug=repo.slug)
+    result = orchestrator._check_blast_radius(gh, None, config, repo, 1, None, lambda _m: None, report)
+    assert result is False
+
+    comment_call = next(c for c in gh.calls if c[0] == "create_comment")
+    body = comment_call[1][-1]
+    # The body lists individual insertions and deletions (not the sum).
+    assert "Lines added: 800" in body  # ty: ignore[unsupported-operator]
+    assert "Lines removed: 800" in body  # ty: ignore[unsupported-operator]
+    add_labels_call = next(c for c in gh.calls if c[0] == "add_labels")
+    assert config.labels["needs_human"] in add_labels_call[1][-1]  # ty: ignore[unsupported-operator]
+
+
+def test_check_blast_radius_unlimited_when_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gh = _blast_gh()
+    repo = RepoEntry(owner="o", name="r", max_diff_files=0, max_diff_lines=0)
+    monkeypatch.setattr(gitutil, "diff_stat", lambda _w, _r: (999, 9999, 9999))
+    report = orchestrator.RepoReport(slug=repo.slug)
+    result = orchestrator._check_blast_radius(gh, None, Config(), repo, 1, None, lambda _m: None, report)
+    assert result is True
+    assert gh.calls == []
+
+
+def test_check_blast_radius_unparseable_safe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gh = _blast_gh()
+    repo = RepoEntry(owner="o", name="r")
+    monkeypatch.setattr(gitutil, "diff_stat", lambda _w, _r: None)
+    report = orchestrator.RepoReport(slug=repo.slug)
+    result = orchestrator._check_blast_radius(gh, None, Config(), repo, 1, None, lambda _m: None, report)
+    assert result is True
+    assert gh.calls == []
+
+
+def test_check_blast_radius_no_branch_push_required(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gh = _blast_gh()
+    repo = RepoEntry(owner="o", name="r")
+
+    def raise_if_called(*_a: object, **_kw: object) -> None:
+        raise AssertionError("push_branch should not be called")
+
+    monkeypatch.setattr(gitutil, "push_branch", raise_if_called)
+    monkeypatch.setattr(gitutil, "diff_stat", lambda _w, _r: (45, 10, 5))
+    # This must not raise — proving push_branch was never invoked.
+    report = orchestrator.RepoReport(slug=repo.slug)
+    result = orchestrator._check_blast_radius(
+        gh,
+        None,
+        Config(),
+        repo,
+        1,
+        None,
+        lambda _m: None,
+        report,
+    )
+    assert result is False
+
+
+def test_run_build_blast_radius_prevents_reviewer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When blast radius triggers, the reviewer is never called."""
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    repo = RepoEntry(owner="octocat", name="hello")
+    issue = Issue(number=1, title="t", body="b", state="open", labels=[], user="u", html_url="")
+    issue_dir = ws.issue_dir(repo.owner, repo.name, issue.number)
+    store = TaskStore(issue_dir)
+    _, tasks = planner.parse_manifest({"tasks": [{"id": "t1", "title": "one"}]})
+    store.materialize(tasks)
+
+    monkeypatch.setattr(gitutil, "ensure_work_clone", lambda *_a, **_k: None)
+
+    def fake_run_task(_ws, _cfg, _repo, number, task, _work_dir, *, token):  # noqa: ANN001, ANN202
+        TaskStore(ws.issue_dir(repo.owner, repo.name, number)).set_status(task.id, DONE, summary="ok")
+        return worker.WorkResult(task_id=task.id, status=DONE, committed=True)
+
+    monkeypatch.setattr(worker, "run_task", fake_run_task)
+
+    # Stub diff_stat to trigger the blast radius.
+    monkeypatch.setattr(gitutil, "diff_stat", lambda _w, _r: (45, 10, 5))
+
+    reviewer_called: list[str] = []
+
+    def fake_review_issue(*_a: object, **_kw: object) -> object:
+        reviewer_called.append("called")
+        from cheaphelp._internal.reviewer import ReviewResult  # noqa: PLC0415
+
+        return ReviewResult(number=1, decision="open-pr")
+
+    monkeypatch.setattr(reviewer, "review_issue", fake_review_issue)
+
+    gh = _RecBuildGH()
+    report = orchestrator.RepoReport(slug=repo.slug)
+    config = Config()
+    orchestrator._run_build(
+        gh,
+        ws,
+        config,
+        repo,
+        issue,
+        "token",
+        lambda _m: None,
+        report,
+    )
+
+    # The reviewer must not have been called.
+    assert reviewer_called == [], "reviewer was called despite blast-radius trigger"
+
+    # needs-human label was added.
+    add_labels_calls = [c for c in gh.calls if c[0] == "add_labels"]
+    needs_human_added = any(config.labels["needs_human"] in cast("list[str]", c[1][-1]) for c in add_labels_calls)
+    assert needs_human_added, "needs-human label should have been added"
+
+
+# --- conventions ------------------------------------------------------------
+def test_read_conventions_no_file(tmp_path: Path) -> None:
+    assert read_conventions(tmp_path) == ""
+
+
+def test_read_conventions_cheaphelp_md(tmp_path: Path) -> None:
+    d = tmp_path
+    (d / "CHEAPHELP.md").write_text("hello", encoding="utf-8")
+    assert read_conventions(d) == "hello"
+
+
+def test_read_conventions_agents_md(tmp_path: Path) -> None:
+    d = tmp_path
+    (d / "AGENTS.md").write_text("world", encoding="utf-8")
+    assert read_conventions(d) == "world"
+
+
+def test_read_conventions_contributing_md(tmp_path: Path) -> None:
+    d = tmp_path
+    (d / "CONTRIBUTING.md").write_text("contrib", encoding="utf-8")
+    assert read_conventions(d) == "contrib"
+
+
+def test_read_conventions_precedence_cheaphelp_wins(tmp_path: Path) -> None:
+    d = tmp_path
+    (d / "CHEAPHELP.md").write_text("ch", encoding="utf-8")
+    (d / "AGENTS.md").write_text("ag", encoding="utf-8")
+    (d / "CONTRIBUTING.md").write_text("ct", encoding="utf-8")
+    assert read_conventions(d) == "ch"
+
+
+def test_read_conventions_precedence_agents_when_no_cheaphelp(tmp_path: Path) -> None:
+    d = tmp_path
+    (d / "AGENTS.md").write_text("ag", encoding="utf-8")
+    (d / "CONTRIBUTING.md").write_text("ct", encoding="utf-8")
+    assert read_conventions(d) == "ag"
+
+
+def test_read_conventions_missing_dir(tmp_path: Path) -> None:
+    assert read_conventions(tmp_path / "nope") == ""
+
+
+def test_read_conventions_not_a_dir(tmp_path: Path) -> None:
+    f = tmp_path / "file"
+    f.write_text("x", encoding="utf-8")
+    assert read_conventions(f) == ""
+
+
+def test_read_conventions_empty_file(tmp_path: Path) -> None:
+    d = tmp_path
+    (d / "CHEAPHELP.md").write_text("", encoding="utf-8")
+    assert read_conventions(d) == ""
+
+
+def test_conventions_files_constant() -> None:
+    assert CONVENTIONS_FILES == ("CHEAPHELP.md", "AGENTS.md", "CONTRIBUTING.md")
+
+
+# --- conventions wiring integration tests -----------------------------------
+
+
+def test_run_responder_forwards_conventions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_run_responder reads CHEAPHELP.md from clone dir and passes it to build_prompt."""
+    clone_dir = tmp_path / "clone"
+    clone_dir.mkdir()
+    (clone_dir / "CHEAPHELP.md").write_text("SENTINEL_HOUSE_RULES", encoding="utf-8")
+    monkeypatch.setenv("CHEAPHELP_AGENT_MOCK", "/dev/null")
+
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    ws.save_config(Config())
+    repo = RepoEntry(owner="octocat", name="hello")
+
+    captured: list[str] = []
+
+    def recording_build_prompt(
+        issue: object,
+        comments: object,
+        bot_login: object,
+        *,
+        conventions: str = "",
+    ) -> str:
+        captured.append(conventions)
+        return ""
+
+    monkeypatch.setattr(responder, "build_prompt", recording_build_prompt)
+
+    fake_gh = _RecordingResponderGH()
+    report = orchestrator.RepoReport(slug=repo.slug)
+
+    orchestrator._run_responder(
+        fake_gh,
+        ws,
+        Config(),
+        repo,
+        fake_gh._issue(),
+        [],
+        "mybot",
+        clone_dir,
+        lambda _m: None,
+        report,
+    )
+
+    assert captured == ["SENTINEL_HOUSE_RULES"]
+
+
+def test_run_planner_forwards_conventions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_run_planner reads CHEAPHELP.md from clone dir and passes it to build_prompt."""
+    clone_dir = tmp_path / "clone"
+    clone_dir.mkdir()
+    (clone_dir / "CHEAPHELP.md").write_text("SENTINEL_HOUSE_RULES", encoding="utf-8")
+    monkeypatch.setenv("CHEAPHELP_AGENT_MOCK", "/dev/null")
+
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    ws.save_config(Config())
+    repo = RepoEntry(owner="octocat", name="hello")
+    issue = _issue(number=1)
+
+    # Planner needs issues.md in the issue dir.
+    issue_dir = ws.issue_dir(repo.owner, repo.name, issue.number)
+    issue_dir.mkdir(parents=True, exist_ok=True)
+    (issue_dir / "issues.md").write_text("# The spec", encoding="utf-8")
+
+    captured: list[str] = []
+
+    def recording_build_prompt(
+        issue_md: str,
+        *,
+        replan_notes: str = "",
+        existing_tasks: object = None,
+        conventions: str = "",
+    ) -> str:
+        captured.append(conventions)
+        return ""
+
+    monkeypatch.setattr(planner, "build_prompt", recording_build_prompt)
+
+    fake_gh = _RecordingResponderGH()
+    report = orchestrator.RepoReport(slug=repo.slug)
+
+    orchestrator._run_planner(
+        fake_gh,
+        ws,
+        Config(),
+        repo,
+        issue,
+        clone_dir,
+        lambda _m: None,
+        report,
+    )
+
+    assert captured == ["SENTINEL_HOUSE_RULES"]
+
+
+def test_run_responder_no_conventions_when_file_absent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_run_responder passes empty string when no conventions file exists."""
+    clone_dir = tmp_path / "clone"
+    clone_dir.mkdir()
+    monkeypatch.setenv("CHEAPHELP_AGENT_MOCK", "/dev/null")
+
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    ws.save_config(Config())
+    repo = RepoEntry(owner="octocat", name="hello")
+
+    captured: list[str] = []
+
+    def recording_build_prompt(
+        issue: object,
+        comments: object,
+        bot_login: object,
+        *,
+        conventions: str = "",
+    ) -> str:
+        captured.append(conventions)
+        return ""
+
+    monkeypatch.setattr(responder, "build_prompt", recording_build_prompt)
+
+    fake_gh = _RecordingResponderGH()
+    report = orchestrator.RepoReport(slug=repo.slug)
+
+    orchestrator._run_responder(
+        fake_gh,
+        ws,
+        Config(),
+        repo,
+        fake_gh._issue(),
+        [],
+        "mybot",
+        clone_dir,
+        lambda _m: None,
+        report,
+    )
+
+    assert captured == [""]
+
+
+def test_worker_run_task_forwards_conventions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """worker.run_task reads AGENTS.md from clone dir and passes it to build_prompt."""
+    clone_dir = tmp_path / "clone"
+    clone_dir.mkdir()
+    (clone_dir / "AGENTS.md").write_text("SENTINEL_AGENT_RULES", encoding="utf-8")
+
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    ws.save_config(Config())
+    repo = RepoEntry(owner="octocat", name="hello")
+    issue_number = 1
+
+    # Set up task store with a task.
+    issue_dir = ws.issue_dir(repo.owner, repo.name, issue_number)
+    store = TaskStore(issue_dir)
+    _, tasks = planner.parse_manifest({"tasks": [{"id": "t1", "title": "Do something"}]})
+    store.materialize(tasks)
+
+    # Mock git + opencode so the function doesn't actually run anything.
+    monkeypatch.setattr(gitutil, "commit_all", lambda *a, **kw: True)
+    monkeypatch.setattr(gitutil, "push_branch", lambda *a, **kw: None)
+
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        opencode,
+        "run_agent",
+        lambda *a, **kw: SimpleNamespace(decision={"status": "done", "summary": "ok"}, usage=None),
+    )
+
+    captured: list[str] = []
+
+    def recording_build_prompt(
+        task: object,
+        issue_md: str,
+        *,
+        conventions: str = "",
+    ) -> str:
+        captured.append(conventions)
+        return "recording"
+
+    monkeypatch.setattr(worker, "build_prompt", recording_build_prompt)
+
+    result = worker.run_task(ws, Config(), repo, issue_number, store.load()[0], clone_dir, token=None)
+
+    assert captured == ["SENTINEL_AGENT_RULES"]
+    assert result.status == "done"
+
+
+def test_reviewer_review_issue_forwards_conventions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """reviewer.review_issue reads AGENTS.md from clone dir and passes it to build_prompt."""
+    clone_dir = tmp_path / "clone"
+    clone_dir.mkdir()
+    (clone_dir / "AGENTS.md").write_text("SENTINEL_AGENT_RULES", encoding="utf-8")
+
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    ws.save_config(Config())
+    repo = RepoEntry(owner="octocat", name="hello")
+    issue_number = 1
+
+    # Set up issue dir with issues.md and a task store with a done task.
+    issue_dir = ws.issue_dir(repo.owner, repo.name, issue_number)
+    issue_dir.mkdir(parents=True, exist_ok=True)
+    (issue_dir / "issues.md").write_text("# Spec", encoding="utf-8")
+    store = TaskStore(issue_dir)
+    _, tasks = planner.parse_manifest({"tasks": [{"id": "t1", "title": "Do it"}]})
+    store.materialize(tasks)
+    store.set_status("t1", DONE, summary="done it")
+
+    # Mock git + opencode.
+    monkeypatch.setattr(gitutil, "diff_against_base", lambda *a, **kw: ("M f.py", "diff --git a/f.py b/f.py"))
+    monkeypatch.setattr(gitutil, "push_branch", lambda *a, **kw: None)
+
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        opencode,
+        "run_agent",
+        lambda *a, **kw: SimpleNamespace(decision={"decision": "open_pr", "pr_title": "x", "pr_body": "y"}, usage=None),
+    )
+
+    captured: list[str] = []
+
+    def recording_build_prompt(
+        issue_md: str,
+        name_status: str,
+        full_diff: str,
+        summaries: str,
+        *,
+        conventions: str = "",
+    ) -> str:
+        captured.append(conventions)
+        return "recording"
+
+    monkeypatch.setattr(reviewer, "build_prompt", recording_build_prompt)
+
+    # Need a fake GH that supports create_pull_request etc.
+    class _FakeReviewGH:
+        def create_pull_request(self, *_args: object, **_kwargs: object) -> dict:
+            return {"number": 99, "html_url": "https://pr"}
+
+        def request_reviewers(self, *_args: object, **_kwargs: object) -> None: ...
+        def ensure_label(self, *_args: object, **_kwargs: object) -> None: ...
+        def add_labels(self, *_args: object, **_kwargs: object) -> None: ...
+        def remove_label(self, *_args: object, **_kwargs: object) -> None: ...
+        def create_comment(self, *_args: object, **_kwargs: object) -> None: ...
+        def authenticated_login(self) -> str:
+            return "mybot"
+
+    result = reviewer.review_issue(
+        _FakeReviewGH(),  # ty: ignore[invalid-argument-type]
+        ws,
+        Config(),
+        repo,
+        issue_number,
+        clone_dir,
+        token=None,
+    )
+
+    assert captured == ["SENTINEL_AGENT_RULES"]
+    assert result.decision == "open_pr"
+
+
+def test_apply_review_push_failure_routes_to_needs_human(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rejected push must not crash the build; it routes the issue to needs-human."""
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    repo = RepoEntry(owner="octocat", name="hello")
+    config = Config()
+
+    def boom(*_a: object, **_kw: object) -> None:
+        raise gitutil.GitError("git push ... failed: refusing to allow a Personal Access Token")
+
+    monkeypatch.setattr(gitutil, "push_branch", boom)
+
+    class _RecGH:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, tuple, dict]] = []
+
+        def __getattr__(self, name: str):
+            def rec(*args: object, **kwargs: object) -> None:
+                self.calls.append((name, args, kwargs))
+
+            return rec
+
+    gh = _RecGH()
+    result = reviewer.apply_review(
+        gh,  # ty: ignore[invalid-argument-type]
+        ws,
+        config,
+        repo,
+        1,
+        {"decision": "open_pr"},
+        tmp_path,
+        token="t",  # noqa: S106
+    )
+
+    assert result.decision == "push_failed"
+    assert result.error is not None
+    names = [c[0] for c in gh.calls]
+    # PR was never opened; the issue was labeled needs-human and dropped from planned.
+    assert "create_pull_request" not in names
+    add = next(c for c in gh.calls if c[0] == "add_labels")
+    assert config.labels["needs_human"] in add[1][-1]
+    assert "remove_label" in names
+
+
+def test_git_run_error_redacts_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failing git command must not leak the auth token in its GitError."""
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    def fake_run(*_a: object, **_k: object) -> object:
+        return SimpleNamespace(returncode=1, stdout="", stderr="remote rejected")
+
+    monkeypatch.setattr(gitutil.subprocess, "run", fake_run)
+    url = "https://x-access-token:supersecret_token@github.com/o/r.git"
+    with pytest.raises(gitutil.GitError) as excinfo:
+        gitutil._run(["push", url, "HEAD:refs/heads/b"])
+    message = str(excinfo.value)
+    assert "supersecret_token" not in message
+    assert "***@github.com" in message
+
+
+# --- cost recording ----------------------------------------------------------
+
+
+def test_run_responder_records_cost(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_run_responder records token/cost data via _record_cost."""
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    ws.save_config(Config())
+    monkeypatch.setenv("CHEAPHELP_AGENT_MOCK", "/dev/null")  # skip clone
+
+    repo = RepoEntry(owner="octocat", name="hello")
+    issue = Issue(number=1, title="t", body="b", state="open", labels=[], user="alice", html_url="")
+
+    usage = opencode.UsageData(prompt_tokens=100, completion_tokens=50, cost_usd=0.002)
+    result = opencode.AgentResult(
+        returncode=0,
+        stdout='```json\n{"action":"comment","reply":"q?"}\n```',
+        stderr="",
+        decision={"action": "comment", "reply": "q?"},
+        usage=usage,
+    )
+    monkeypatch.setattr(opencode, "run_agent", lambda *a, **kw: result)
+
+    fake_gh = _RecordingResponderGH()
+    report = orchestrator.RepoReport(slug=repo.slug)
+
+    orchestrator._run_responder(
+        fake_gh,
+        ws,
+        Config(),
+        repo,
+        issue,
+        [],
+        "mybot",
+        tmp_path,
+        lambda _m: None,
+        report,
+    )
+
+    assert report.cost == usage
+    assert report.issue_costs[1]["responder"] == [usage]
+
+    # Verify cost.json was written and round-trips.
+    cost_path = ws.issue_dir(repo.owner, repo.name, 1) / "cost.json"
+    assert cost_path.exists()
+    loaded = IssueCostStore(ws.issue_dir(repo.owner, repo.name, 1)).load()
+    assert loaded == usage
+
+
+def test_run_responder_skips_cost_when_usage_none(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A result with usage=None is a no-op for cost recording."""
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    ws.save_config(Config())
+    monkeypatch.setenv("CHEAPHELP_AGENT_MOCK", "/dev/null")
+
+    repo = RepoEntry(owner="octocat", name="hello")
+    issue = Issue(number=1, title="t", body="b", state="open", labels=[], user="alice", html_url="")
+
+    result = opencode.AgentResult(
+        returncode=0,
+        stdout='```json\n{"action":"comment","reply":"q?"}\n```',
+        stderr="",
+        decision={"action": "comment", "reply": "q?"},
+        usage=None,
+    )
+    monkeypatch.setattr(opencode, "run_agent", lambda *a, **kw: result)
+
+    fake_gh = _RecordingResponderGH()
+    report = orchestrator.RepoReport(slug=repo.slug)
+
+    orchestrator._run_responder(
+        fake_gh,
+        ws,
+        Config(),
+        repo,
+        issue,
+        [],
+        "mybot",
+        tmp_path,
+        lambda _m: None,
+        report,
+    )
+
+    assert report.cost == opencode.UsageData()
+    assert report.issue_costs == {}
+    cost_path = ws.issue_dir(repo.owner, repo.name, 1) / "cost.json"
+    assert not cost_path.exists()
+
+
+def test_run_planner_records_cost(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_run_planner records cost from the planner agent call."""
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    ws.save_config(Config())
+    monkeypatch.setenv("CHEAPHELP_AGENT_MOCK", "/dev/null")
+
+    repo = RepoEntry(owner="octocat", name="hello")
+    issue = Issue(number=1, title="t", body="b", state="open", labels=[], user="alice", html_url="")
+
+    # Create issues.md so planner does not early-return.
+    issue_dir = ws.issue_dir(repo.owner, repo.name, issue.number)
+    issue_dir.mkdir(parents=True, exist_ok=True)
+    (issue_dir / "issues.md").write_text("# The spec", encoding="utf-8")
+
+    usage = opencode.UsageData(prompt_tokens=200, completion_tokens=100, cost_usd=0.008)
+    result = opencode.AgentResult(
+        returncode=0,
+        stdout='```json\n{"plan_summary":"plan","tasks":[{"id":"t1","title":"x"}]}\n```',
+        stderr="",
+        decision={"plan_summary": "plan", "tasks": [{"id": "t1", "title": "x"}]},
+        usage=usage,
+    )
+    monkeypatch.setattr(opencode, "run_agent", lambda *a, **kw: result)
+
+    # Mock apply_plan so it doesn't actually modify GitHub state.
+    def fake_apply_plan(*_a: object, **_kw: object) -> object:
+        from cheaphelp._internal.planner import PlanResult  # noqa: PLC0415
+
+        return PlanResult(number=1, task_count=1)
+
+    monkeypatch.setattr(planner, "apply_plan", fake_apply_plan)
+
+    fake_gh = _RecordingResponderGH()
+    report = orchestrator.RepoReport(slug=repo.slug)
+
+    orchestrator._run_planner(
+        fake_gh,
+        ws,
+        Config(),
+        repo,
+        issue,
+        tmp_path,
+        lambda _m: None,
+        report,
+    )
+
+    assert report.cost == usage
+    assert report.issue_costs[1]["planner"] == [usage]
+    cost_path = ws.issue_dir(repo.owner, repo.name, 1) / "cost.json"
+    assert cost_path.exists()
+    loaded = IssueCostStore(ws.issue_dir(repo.owner, repo.name, 1)).load()
+    assert loaded == usage
+
+
+def test_run_build_records_worker_and_reviewer_costs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_run_build records costs for each worker turn and the reviewer."""
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    repo = RepoEntry(owner="octocat", name="hello")
+    issue = Issue(number=1, title="t", body="b", state="open", labels=[], user="u", html_url="")
+    issue_dir = ws.issue_dir(repo.owner, repo.name, issue.number)
+    store = TaskStore(issue_dir)
+    _, tasks = planner.parse_manifest(
+        {"tasks": [{"id": "t1", "title": "one"}, {"id": "t2", "title": "two"}]},
+    )
+    store.materialize(tasks)
+
+    monkeypatch.setattr(gitutil, "ensure_work_clone", lambda *_a, **_k: None)
+    monkeypatch.setattr(gitutil, "diff_stat", lambda *_a, **_k: None)
+    monkeypatch.setattr(gitutil, "commit_all", lambda *_a, **_k: False)
+    monkeypatch.setattr(gitutil, "push_branch", lambda *_a, **_k: None)
+
+    worker_usage = opencode.UsageData(prompt_tokens=50, completion_tokens=25, cost_usd=0.001)
+
+    def fake_run_task(_ws, _cfg, _repo, number, task, _work_dir, *, token):  # noqa: ANN001, ANN202
+        TaskStore(ws.issue_dir(repo.owner, repo.name, number)).set_status(task.id, DONE, summary="ok")
+        return worker.WorkResult(task_id=task.id, status=DONE, committed=True, usage=worker_usage)
+
+    monkeypatch.setattr(worker, "run_task", fake_run_task)
+
+    reviewer_usage = opencode.UsageData(prompt_tokens=30, completion_tokens=15, cost_usd=0.002)
+
+    def fake_review_issue(*_a: object, **_kw: object) -> object:
+        return reviewer.ReviewResult(number=1, decision="open_pr", usage=reviewer_usage)
+
+    monkeypatch.setattr(reviewer, "review_issue", fake_review_issue)
+
+    gh = _RecBuildGH()
+    report = orchestrator.RepoReport(slug=repo.slug)
+    config = Config()
+    orchestrator._run_build(gh, ws, config, repo, issue, "token", lambda _m: None, report)
+
+    # Two workers + one reviewer.
+    expected_cost = worker_usage + worker_usage + reviewer_usage
+    assert report.cost == expected_cost
+    assert len(report.issue_costs[1]["worker"]) == 2
+    assert report.issue_costs[1]["worker"][0] == worker_usage
+    assert report.issue_costs[1]["worker"][1] == worker_usage
+    assert report.issue_costs[1]["reviewer"] == [reviewer_usage]
+
+
+def test_tick_report_total_cost_sums_across_repos(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """TickReport.total_cost equals the sum of RepoReport.cost across repos."""
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    ws.save_config(Config())
+    monkeypatch.setenv("CHEAPHELP_AGENT_MOCK", "/dev/null")
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+
+    # Register two repos.
+    reg = Registry(ws.registry_path)
+    reg.add(RepoEntry(owner="octocat", name="hello", enabled=True))
+    reg.add(RepoEntry(owner="octocat", name="world", enabled=True))
+
+    # Mock the GitHub client so the tick never touches the network: both repos
+    # report zero open issues, so each yields a RepoReport with cost=UsageData().
+    class _NoIssuesGH:
+        def __enter__(self) -> _NoIssuesGH:
+            return self
+
+        def __exit__(self, *_exc: object) -> bool:
+            return False
+
+        def authenticated_login(self) -> str:
+            return "mybot"
+
+        def list_open_issues(self, _owner: str, _name: str) -> list[Issue]:
+            return []
+
+    monkeypatch.setattr(orchestrator, "GitHubClient", lambda *_a, **_k: _NoIssuesGH())
+
+    report = orchestrator.tick(ws, log=lambda _m: None)
+
+    # Both repos have cost=UsageData() (no agent ran, mock mode /dev/null).
+    assert len(report.repos) == 2
+    assert report.total_cost == opencode.UsageData()
+    assert report.total_cost == report.repos[0].cost + report.repos[1].cost

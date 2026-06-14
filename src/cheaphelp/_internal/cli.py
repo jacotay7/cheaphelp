@@ -72,6 +72,20 @@ def get_parser() -> argparse.ArgumentParser:
         help="Shell command run in the clone before the gate to auto-fix trivial "
         'issues (e.g. "ruff check --fix . ; ruff format ."). Changes are committed.',
     )
+    p_add.add_argument(
+        "--max-diff-files",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Maximum files allowed in a single PR for this repo (0 = unlimited, default 30).",
+    )
+    p_add.add_argument(
+        "--max-diff-lines",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Maximum lines (added+removed) allowed in a single PR (0 = unlimited, default 1000).",
+    )
     p_add.set_defaults(func=commands.cmd_repo_add)
     p_list = repo_sub.add_parser("list", help="List registered repositories.")
     p_list.add_argument(
@@ -98,7 +112,51 @@ def get_parser() -> argparse.ArgumentParser:
         default=None,
         help="Replace the auto-fix shell command. Pass an empty string to disable auto-fix.",
     )
+    p_set.add_argument(
+        "--max-diff-files",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Maximum files allowed in a single PR for this repo (0 = unlimited, default 30).",
+    )
+    p_set.add_argument(
+        "--max-diff-lines",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Maximum lines (added+removed) allowed in a single PR (0 = unlimited, default 1000).",
+    )
     p_set.set_defaults(func=commands.cmd_repo_set)
+    p_update = repo_sub.add_parser(
+        "update",
+        help="Update checks/autofix/max-diff-* on an already-registered repository (alias of `set`).",
+    )
+    p_update.add_argument("slug", help="Repository as owner/name or a GitHub URL.")
+    p_update.add_argument(
+        "--checks",
+        default=None,
+        help="Replace the quality-gate shell command. Pass an empty string to disable the gate.",
+    )
+    p_update.add_argument(
+        "--autofix",
+        default=None,
+        help="Replace the auto-fix shell command. Pass an empty string to disable auto-fix.",
+    )
+    p_update.add_argument(
+        "--max-diff-files",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Maximum files allowed in a single PR for this repo (0 = unlimited, default 30).",
+    )
+    p_update.add_argument(
+        "--max-diff-lines",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Maximum lines (added+removed) allowed in a single PR (0 = unlimited, default 1000).",
+    )
+    p_update.set_defaults(func=commands.cmd_repo_set)
     p_en = repo_sub.add_parser("enable", help="Enable processing for a repository.")
     p_en.add_argument("slug")
     p_en.set_defaults(func=lambda a: commands.cmd_repo_toggle(a, enabled=True))
@@ -151,16 +209,35 @@ def get_parser() -> argparse.ArgumentParser:
     p_sync.add_argument("--force", action="store_true", help="Overwrite workspace prompts.")
     p_sync.set_defaults(func=commands.cmd_agents_sync)
 
+    # config
+    p_config = subparsers.add_parser("config", help="View or change configuration settings.")
+    config_sub = p_config.add_subparsers(dest="config_command", metavar="<action>")
+    p_cfg_show = config_sub.add_parser("show", help="Print the effective configuration.")
+    p_cfg_show.set_defaults(func=commands.cmd_config_show)
+    p_cfg_get = config_sub.add_parser("get", help="Look up a single config value by dotted path.")
+    p_cfg_get.add_argument("key", help="Dotted path to a config key (e.g. models.worker).")
+    p_cfg_get.set_defaults(func=commands.cmd_config_get)
+    p_cfg_set = config_sub.add_parser("set", help="Set a config value by dotted path.")
+    p_cfg_set.add_argument("key", help="Dotted path to a config key (e.g. agent_timeout).")
+    p_cfg_set.add_argument("value", help="New value for the config key.")
+    p_cfg_set.set_defaults(func=commands.cmd_config_set)
+
     # doctor
     subparsers.add_parser("doctor", help="Check workspace, tokens and opencode.").set_defaults(
         func=commands.cmd_doctor,
     )
 
     # status
-    subparsers.add_parser(
+    p_status = subparsers.add_parser(
         "status",
         help="List open issues for each enabled repo and their pipeline stage.",
-    ).set_defaults(func=commands.cmd_status)
+    )
+    p_status.add_argument(
+        "--costs",
+        action="store_true",
+        help="Also show the cumulative cost per issue (read from <issue_dir>/cost.json).",
+    )
+    p_status.set_defaults(func=commands.cmd_status)
 
     # clean
     p_clean = subparsers.add_parser(
@@ -173,6 +250,22 @@ def get_parser() -> argparse.ArgumentParser:
         help="Report what would be removed without deleting anything.",
     )
     p_clean.set_defaults(func=commands.cmd_clean)
+
+    # logs
+    p_logs = subparsers.add_parser("logs", help="Show recent run activity, or follow it live.")
+    p_logs.add_argument(
+        "--follow",
+        "-f",
+        action="store_true",
+        help="Stream new log lines as they are appended (Ctrl-C to stop).",
+    )
+    p_logs.add_argument(
+        "--issue",
+        type=int,
+        metavar="N",
+        help="Show only lines that reference issue #N.",
+    )
+    p_logs.set_defaults(func=commands.cmd_logs)
 
     return parser
 

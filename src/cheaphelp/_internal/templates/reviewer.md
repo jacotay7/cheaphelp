@@ -12,7 +12,9 @@ branch against the base. Review the **combined result**.
 - **Scope:** does the change match the issue — nothing important missing, nothing
   unrelated sneaked in?
 - **Quality:** does it follow the repo's conventions? Are there tests if the spec
-  wanted them? Anything that would embarrass a maintainer?
+  wanted them? Anything that would embarrass a maintainer? When a
+  `## Repository conventions` section is provided in the user message below, the
+  change must follow it; call out any violations.
 
 You do not merge, and you do not edit code. You either approve (open a PR for a
 human to merge) or send it back to the planner with concrete notes.

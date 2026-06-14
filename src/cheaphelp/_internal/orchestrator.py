@@ -22,12 +22,14 @@ from dataclasses import dataclass, field
 
 from cheaphelp._internal import cleanup, gitutil, opencode, planner, responder, reviewer, worker
 from cheaphelp._internal.config import Config, Workspace
+from cheaphelp._internal.conventions import read_conventions
 from cheaphelp._internal.env import GITHUB_TOKEN_KEY, OPENROUTER_API_KEY, load_into_environ
 from cheaphelp._internal.github import GitHubClient, Issue
 from cheaphelp._internal.gitutil import ensure_clone
 from cheaphelp._internal.lock import RunLock
+from cheaphelp._internal.opencode import UsageData
 from cheaphelp._internal.registry import Registry, RepoEntry
-from cheaphelp._internal.tasks import TaskStore
+from cheaphelp._internal.tasks import IssueCostStore, TaskStore
 
 Logger = Callable[[str], None]
 
@@ -103,6 +105,8 @@ class RepoReport:
     turns_taken: int = 0
     actions: list[str] = field(default_factory=list)
     error: str | None = None
+    cost: UsageData = field(default_factory=UsageData)
+    issue_costs: dict[int, dict[str, list[UsageData]]] = field(default_factory=dict)
 
 
 @dataclass
@@ -114,6 +118,7 @@ class TickReport:
     repos: list[RepoReport] = field(default_factory=list)
     error: str | None = None
     skipped: bool = False
+    total_cost: UsageData = field(default_factory=UsageData)
 
     @property
     def total_turns(self) -> int:
@@ -133,10 +138,28 @@ def _short_exc(exc: Exception) -> str:
     return text if len(text) <= limit else text[:limit] + "…"
 
 
+def _record_cost(
+    workspace: Workspace,
+    repo: RepoEntry,
+    number: int,
+    role: str,
+    usage: UsageData | None,
+    report: RepoReport,
+) -> None:
+    """Record token/cost data from an agent turn and persist to the issue's cost store."""
+    if usage is None:
+        return
+    IssueCostStore(workspace.issue_dir(repo.owner, repo.name, number)).add(usage)
+    report.cost = report.cost + usage
+    by_issue = report.issue_costs.setdefault(number, {})
+    by_issue.setdefault(role, []).append(usage)
+
+
 def _run_responder(gh, workspace, config, repo, issue, comments, bot_login, cwd, log, report) -> None:  # noqa: ANN001
-    prompt = responder.build_prompt(issue, comments, bot_login)
+    prompt = responder.build_prompt(issue, comments, bot_login, conventions=read_conventions(cwd))
     log(f"  · {repo.slug}#{issue.number}: running responder ({config.model_for('responder')})…")
     result = opencode.run_agent(workspace, config, "responder", prompt, cwd=cwd, timeout=config.agent_timeout)
+    _record_cost(workspace, repo, issue.number, "responder", result.usage, report)
     if result.decision is None:
         log(f"  ! {repo.slug}#{issue.number}: responder produced no decision (rc={result.returncode})")
         report.actions.append(f"#{issue.number}: responder unparseable")
@@ -162,9 +185,11 @@ def _run_planner(gh, workspace, config, repo, issue, cwd, log, report) -> None: 
         spec_path.read_text(encoding="utf-8"),
         replan_notes=replan_notes,
         existing_tasks=existing_tasks,
+        conventions=read_conventions(cwd),
     )
     log(f"  · {repo.slug}#{issue.number}: running planner ({config.model_for('planner')})…")
     result = opencode.run_agent(workspace, config, "planner", prompt, cwd=cwd, timeout=config.agent_timeout)
+    _record_cost(workspace, repo, issue.number, "planner", result.usage, report)
     if result.decision is None:
         log(f"  ! {repo.slug}#{issue.number}: planner produced no decision (rc={result.returncode})")
         report.actions.append(f"#{issue.number}: planner unparseable")
@@ -237,6 +262,58 @@ def _quality_gate(gh, workspace, config, repo, number, work_dir, log, report) ->
     return False
 
 
+def _check_blast_radius(gh, workspace, config, repo, number, work_dir, log, report) -> bool:  # noqa: ANN001, ARG001
+    """Bypass the reviewer when the branch diff vs base exceeds the per-repo limits.
+
+    Returns True if the diff is within limits (proceed to the reviewer) or if
+    we can't measure it (safe default). On a violation, posts an attributed
+    comment with the diff stats, adds the `needs-human` label, removes
+    `in-progress`, and returns False so the caller skips the reviewer.
+    """
+    stats = gitutil.diff_stat(work_dir, repo)
+    if stats is None:
+        return True  # unparseable / no diff -> don't block
+    files, insertions, deletions = stats
+
+    files_ok = repo.max_diff_files == 0 or files <= repo.max_diff_files
+    lines = insertions + deletions
+    lines_ok = repo.max_diff_lines == 0 or lines <= repo.max_diff_lines
+    if files_ok and lines_ok:
+        return True
+
+    def _fmt(value: int) -> str:
+        return "unlimited" if value == 0 else str(value)
+
+    body = (
+        f"The diff exceeds the configured blast-radius guardrail and was not "
+        f"opened as a PR. The branch remains on the remote for inspection.\n\n"
+        f"- Files changed: {files} (limit: {_fmt(repo.max_diff_files)})\n"
+        f"- Lines added: {insertions} (limit: {_fmt(repo.max_diff_lines)})\n"
+        f"- Lines removed: {deletions}\n\n"
+        f"A human can widen the limits via "
+        f"`cheaphelp repo set --max-diff-files N --max-diff-lines N {repo.slug}` "
+        f"or split the work into smaller issues."
+    )
+    gh.ensure_label(
+        repo.owner,
+        repo.name,
+        config.labels["needs_human"],
+        color="d93f0b",
+        description="cheaphelp: stuck; needs a human",
+    )
+    gh.add_labels(repo.owner, repo.name, number, [config.labels["needs_human"]])
+    gh.remove_label(repo.owner, repo.name, number, config.labels["in_progress"])
+    gh.create_comment(
+        repo.owner,
+        repo.name,
+        number,
+        responder.cheaphelp_message(body, "blast-radius", config),
+    )
+    log(f"  ! {repo.slug}#{number}: blast-radius exceeded ({files} files, {lines} lines) -> needs-human")
+    report.actions.append(f"#{number}: blast-radius exceeded")
+    return False
+
+
 def _run_build(gh, workspace, config, repo, issue, token, log, report) -> None:  # noqa: ANN001
     """Worker + reviewer stage for a planned issue."""
     number = issue.number
@@ -276,6 +353,7 @@ def _run_build(gh, workspace, config, repo, issue, token, log, report) -> None: 
             break
         log(f"  · {repo.slug}#{number}: running worker {task.id} ({config.model_for('worker')}): {task.title}…")
         res = worker.run_task(workspace, config, repo, number, task, work_dir, token=token)
+        _record_cost(workspace, repo, number, "worker", res.usage, report)
         report.turns_taken += 1
         ran += 1
         flag = " +commit" if res.committed else ""
@@ -293,8 +371,14 @@ def _run_build(gh, workspace, config, repo, issue, token, log, report) -> None: 
         # Quality gate: a failing check never becomes a PR — loop back to planning.
         if repo.checks and not _quality_gate(gh, workspace, config, repo, number, work_dir, log, report):
             return
+        # Blast-radius guardrail: skip the reviewer (and its LLM call) when the
+        # diff is too large to open as a PR. Routes the issue to needs-human
+        # with a diff-stats comment; the branch stays on the remote.
+        if not _check_blast_radius(gh, workspace, config, repo, number, work_dir, log, report):
+            return
         log(f"  > {repo.slug}#{number}: all tasks done; running reviewer")
         rr = reviewer.review_issue(gh, workspace, config, repo, number, work_dir, token=token)
+        _record_cost(workspace, repo, number, "reviewer", rr.usage, report)
         report.turns_taken += 1
         detail = rr.pr_url or rr.error or rr.decision
         log(f"  > {repo.slug}#{number}: reviewer {rr.decision} ({detail})")
@@ -384,7 +468,7 @@ def _process_repo(
             log(f"  ! {repo.slug}: clone failed: {exc}")
             return report
 
-    for stage, issue, comments in work:
+    for stage, issue, _comments in work:
         # Per-issue lock: if another tick is already on this issue, skip it (don't
         # block) and move to the next so concurrent ticks make progress.
         with RunLock(workspace.issue_lock_path(repo.owner, repo.name, issue.number)) as issue_lock:
@@ -395,13 +479,42 @@ def _process_repo(
                 report.issues_skipped += 1
                 report.actions.append(f"#{issue.number}: skipped (in progress elsewhere)")
                 continue
+            # Re-validate under the lock. Between classifying this issue and
+            # acquiring its lock, an overlapping tick may have already acted on it
+            # (responded, planned, advanced it to a later stage). Re-fetch the
+            # current state and act only if it is still the same stage — this makes
+            # overlapping ticks idempotent: no double responses, plans, etc.
+            try:
+                fresh_issue = gh.get_issue(repo.owner, repo.name, issue.number)
+                fresh_comments = gh.list_issue_comments(repo.owner, repo.name, issue.number)
+            except Exception as exc:  # noqa: BLE001 - a refresh failure must not abort the tick
+                log(f"  ! {repo.slug}#{issue.number}: could not refresh state: {_short_exc(exc)}")
+                report.actions.append(f"#{issue.number}: refresh failed")
+                continue
+            current = classify(fresh_issue, fresh_comments, bot_login, config)
+            if current != stage:
+                log(f"  · {repo.slug}#{issue.number}: now '{current}' (was '{stage}'); already handled, skipping")
+                report.issues_skipped += 1
+                report.actions.append(f"#{issue.number}: skipped (already {current})")
+                continue
             try:
                 if stage == "responder":
-                    _run_responder(gh, workspace, config, repo, issue, comments, bot_login, cwd, log, report)
+                    _run_responder(
+                        gh,
+                        workspace,
+                        config,
+                        repo,
+                        fresh_issue,
+                        fresh_comments,
+                        bot_login,
+                        cwd,
+                        log,
+                        report,
+                    )
                 elif stage == "planner":
-                    _run_planner(gh, workspace, config, repo, issue, cwd, log, report)
+                    _run_planner(gh, workspace, config, repo, fresh_issue, cwd, log, report)
                 elif stage == "build":
-                    _run_build(gh, workspace, config, repo, issue, token, log, report)
+                    _run_build(gh, workspace, config, repo, fresh_issue, token, log, report)
             except Exception as exc:  # noqa: BLE001 - one issue's failure must not abort the tick
                 log(f"  ! {repo.slug}#{issue.number}: {stage} crashed: {_short_exc(exc)}")
                 report.actions.append(f"#{issue.number}: {stage} crashed")
@@ -444,7 +557,11 @@ def tick(
         return report
 
     try:
-        with GitHubClient(token) as gh:
+        with GitHubClient(
+            token,
+            retry_attempts=config.retry_attempts,
+            retry_base_delay=config.retry_base_delay,
+        ) as gh:
             report.bot_login = gh.authenticated_login()
             log(f"acting as @{report.bot_login} ({'dry-run' if dry_run else 'live'})")
             for repo in repos:
@@ -463,5 +580,8 @@ def tick(
                 )
     except Exception as exc:  # noqa: BLE001 - top-level guard for the tick
         report.error = str(exc)
+
+    for r in report.repos:
+        report.total_cost = report.total_cost + r.cost
 
     return report

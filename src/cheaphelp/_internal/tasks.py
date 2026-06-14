@@ -18,6 +18,8 @@ import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+from cheaphelp._internal.opencode import UsageData
+
 # Task lifecycle.
 PENDING = "pending"
 IN_PROGRESS = "in_progress"
@@ -141,3 +143,32 @@ class TaskStore:
                 count = task.attempts
         self.materialize(tasks)
         return count
+
+
+class IssueCostStore:
+    """Persistent cumulative token + cost counter for a single issue."""
+
+    def __init__(self, issue_dir: Path) -> None:
+        self.dir = issue_dir
+        self.path = issue_dir / "cost.json"
+
+    def load(self) -> UsageData:
+        if not self.path.exists():
+            return UsageData()
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return UsageData()
+        if not isinstance(data, dict):
+            return UsageData()
+        return UsageData.from_dict(data)
+
+    def save(self, usage: UsageData) -> None:
+        self.dir.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(json.dumps(usage.to_dict(), indent=2) + "\n", encoding="utf-8")
+
+    def add(self, usage: UsageData) -> UsageData:
+        """Add a turn's usage to the cumulative total, persist, return the new total."""
+        total = self.load() + usage
+        self.save(total)
+        return total

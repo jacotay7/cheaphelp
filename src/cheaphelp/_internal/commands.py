@@ -12,8 +12,10 @@ import getpass
 import json
 import os
 import sys
+import time
 from dataclasses import asdict
 from pathlib import Path
+from typing import Any
 
 from cheaphelp._internal import cleanup, opencode, systemd
 from cheaphelp._internal.config import Config, Workspace
@@ -25,8 +27,12 @@ from cheaphelp._internal.env import (
     update_env_file,
 )
 from cheaphelp._internal.github import GitHubClient, GitHubError
+from cheaphelp._internal.opencode import UsageData
 from cheaphelp._internal.orchestrator import classify, tick
 from cheaphelp._internal.registry import Registry, RepoEntry, parse_slug
+from cheaphelp._internal.tasks import IssueCostStore
+
+_LOG_TAIL_LINES = 50
 
 
 def _workspace(args: argparse.Namespace) -> Workspace:
@@ -38,6 +44,57 @@ def _require_workspace(ws: Workspace) -> int | None:
         print(f"No workspace at {ws.home}. Run `cheaphelp init` first.", file=sys.stderr)
         return 1
     return None
+
+
+def _format_cost_lines(report: object) -> list[str]:
+    """Return the per-tick cost summary lines (excluding the leading "Cost:").
+
+    The first line is the aggregate; subsequent lines are per-issue with a
+    per-role breakdown. Returns [] when there is no recorded cost.
+    """
+    total_cost: UsageData = getattr(report, "total_cost", UsageData())
+    if total_cost.cost_usd == 0.0 and total_cost.total_tokens == 0:
+        return []
+
+    lines: list[str] = [
+        f"Cost: ${total_cost.cost_usd:.3f} ({total_cost.prompt_tokens:,} prompt + {total_cost.completion_tokens:,} completion tokens)",
+    ]
+
+    repos: list[object] = getattr(report, "repos", [])
+    for repo in repos:
+        slug: str = getattr(repo, "slug", "")
+        issue_costs: dict[int, dict[str, list[UsageData]]] = getattr(repo, "issue_costs", {})
+        for number in sorted(issue_costs):
+            by_role = issue_costs[number]
+            # Compute issue_total and breakdown_str.
+            role_order = ["responder", "planner", "worker", "reviewer"]
+            seen: set[str] = set()
+            parts: list[str] = []
+            issue_total = UsageData()
+            for role in role_order:
+                if role in by_role:
+                    seen.add(role)
+                    usages = by_role[role]
+                    total_for_role = sum(usages, UsageData())
+                    issue_total += total_for_role
+                    count = len(usages)
+                    if count > 1:
+                        parts.append(f"{role} x{count} ${total_for_role.cost_usd:.3f}")
+                    else:
+                        parts.append(f"{role} ${total_for_role.cost_usd:.3f}")
+            # Remaining roles (outside the stable order).
+            for role in sorted(by_role):
+                if role not in seen:
+                    usages = by_role[role]
+                    total_for_role = sum(usages, UsageData())
+                    issue_total += total_for_role
+                    count = len(usages)
+                    if count > 1:
+                        parts.append(f"{role} x{count} ${total_for_role.cost_usd:.3f}")
+                    else:
+                        parts.append(f"{role} ${total_for_role.cost_usd:.3f}")
+            lines.append(f"  {slug}#{number}:   ${issue_total.cost_usd:.3f}  ({', '.join(parts)})")
+    return lines
 
 
 # --- init ------------------------------------------------------------------
@@ -123,6 +180,8 @@ def cmd_repo_add(args: argparse.Namespace) -> int:
         print("Warning: no GITHUB_TOKEN set; adding without verification.", file=sys.stderr)
 
     registry = Registry(ws.registry_path)
+    mdf = getattr(args, "max_diff_files", None)
+    mdl = getattr(args, "max_diff_lines", None)
     added = registry.add(
         RepoEntry(
             owner=owner,
@@ -130,6 +189,8 @@ def cmd_repo_add(args: argparse.Namespace) -> int:
             default_branch=default_branch,
             autofix=getattr(args, "autofix", "") or "",
             checks=getattr(args, "checks", "") or "",
+            max_diff_files=30 if mdf is None else mdf,
+            max_diff_lines=1000 if mdl is None else mdl,
         ),
     )
     if not added:
@@ -197,11 +258,15 @@ def cmd_repo_set(args: argparse.Namespace) -> int:
         print(str(exc), file=sys.stderr)
         return 2
 
-    updates: dict[str, str] = {}
+    updates: dict[str, str | int] = {}
     if getattr(args, "checks", None) is not None:
         updates["checks"] = args.checks
     if getattr(args, "autofix", None) is not None:
         updates["autofix"] = args.autofix
+    if getattr(args, "max_diff_files", None) is not None:
+        updates["max_diff_files"] = args.max_diff_files
+    if getattr(args, "max_diff_lines", None) is not None:
+        updates["max_diff_lines"] = args.max_diff_lines
 
     if not updates:
         print(f"Nothing to update for {owner}/{name}.")
@@ -246,6 +311,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     if getattr(report, "skipped", False):
         return 0  # skip message already logged via the tick's `log` callback
     print(f"\nDone. {report.total_turns} agent turn(s) across {len(report.repos)} repo(s).")
+    for cost_line in _format_cost_lines(report):
+        log(cost_line)
     return 0
 
 
@@ -359,6 +426,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         return 0
 
     title_width = 60
+    show_costs = getattr(args, "costs", False)
     try:
         with GitHubClient(token) as gh:
             bot_login = gh.authenticated_login()
@@ -381,7 +449,11 @@ def cmd_status(args: argparse.Namespace) -> int:
                     stage = classify(issue, comments, bot_login, config)
                     label = stage
                     title = issue.title[: title_width - 1] + "\u2026" if len(issue.title) > title_width else issue.title
-                    print(f"  #{issue.number:<6} {title:<{title_width}}  {label}")
+                    if show_costs:
+                        cost = IssueCostStore(ws.issue_dir(repo.owner, repo.name, issue.number)).load()
+                        print(f"  #{issue.number:<6} {title:<{title_width}}  {label}  ${cost.cost_usd:.3f}")
+                    else:
+                        print(f"  #{issue.number:<6} {title:<{title_width}}  {label}")
     except GitHubError as exc:
         print(f"GitHub API error: {exc}", file=sys.stderr)
         return 1
@@ -424,5 +496,253 @@ def cmd_clean(args: argparse.Namespace) -> int:
     return 0
 
 
+# --- logs ------------------------------------------------------------------
+def cmd_logs(args: argparse.Namespace) -> int:
+    """Display tick activity from the run log for today.
+
+    Resolves the workspace via ``_workspace(args)`` and gates on
+    ``_require_workspace``.  Reads the daily log file, optionally filters by
+    issue number (``#<n>``), and can stream new lines as they are appended.
+
+    Parameters:
+        args: Parsed command-line namespace.  Expected attributes:
+            ``home`` (optional), ``issue`` (int or None), ``follow`` (bool).
+
+    Returns:
+        Exit code (0 on success).
+    """
+    ws = _workspace(args)
+    if (rc := _require_workspace(ws)) is not None:
+        return rc
+
+    log_path = ws.logs_dir / f"run-{datetime.datetime.now(datetime.timezone.utc).date().isoformat()}.log"
+    issue: int | None = getattr(args, "issue", None)
+    follow: bool = bool(getattr(args, "follow", False))
+
+    if not log_path.exists():
+        print(f"(no log for today; expected {log_path.name})", file=sys.stderr)
+        return 0
+
+    if not follow:
+        try:
+            text = log_path.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            print(f"Failed to read log: {exc}", file=sys.stderr)
+            return 1
+        lines = text.splitlines()
+        tail = lines[-_LOG_TAIL_LINES:] if len(lines) > _LOG_TAIL_LINES else lines
+        for line in tail:
+            if issue is None or f"#{issue}" in line:
+                print(line)
+        return 0
+
+    # --follow path: tail -f semantics, only new appends.
+    try:
+        with log_path.open("r", encoding="utf-8", errors="replace") as f:
+            f.seek(0, os.SEEK_END)
+            while True:
+                try:
+                    chunk = f.read()
+                    if chunk:
+                        for line in chunk.splitlines():
+                            if issue is None or f"#{issue}" in line:
+                                print(line)
+                        sys.stdout.flush()
+                    time.sleep(0.5)
+                except KeyboardInterrupt:
+                    return 0
+    except OSError as exc:
+        print(f"Failed to follow log: {exc}", file=sys.stderr)
+        return 1
+
+
 def add_config_overrides(config: Config) -> None:  # pragma: no cover - reserved
     """Placeholder for future per-invocation config overrides."""
+
+
+# --- config ------------------------------------------------------------------
+_CONFIG_SCALAR_KEYS: dict[str, type] = {
+    "version": int,
+    "poll_interval": str,
+    "opencode_bin": str,
+    "agent_timeout": float,
+    "max_issues_per_tick": int,
+    "max_tasks_per_tick": int,
+    "max_task_attempts": int,
+    "prune_work_clones": bool,
+}
+
+_CONFIG_DICT_KEYS: dict[str, dict[str, type]] = {
+    "models": {"responder": str, "planner": str, "worker": str, "reviewer": str},
+    "variants": {"responder": str, "planner": str, "worker": str, "reviewer": str},
+}
+
+_OPENSCODE_AFFECTED: set[str] = {"models", "variants"}
+
+
+def _validate_known_path(path: str) -> tuple[str, str | None, type]:
+    """Validate a dotted config path and return ``(top_key, sub_key, py_type)``.
+
+    Raises:
+        ValueError: If the path is unknown.
+    """
+    parts = path.split(".", 1) if "." in path else (path, None)
+    top = parts[0]
+    # Check scalar keys first (no sub-key allowed).
+    if top in _CONFIG_SCALAR_KEYS:
+        if parts[1] is not None:
+            raise ValueError(f"Unknown config key: {path}")
+        return top, None, _CONFIG_SCALAR_KEYS[top]
+
+    # Check dict keys.
+    if top in _CONFIG_DICT_KEYS:
+        if parts[1] is None:
+            raise ValueError(f"Unknown config key: {path}")
+        sub = parts[1]
+        # Reject deeper nesting (dotted path within a dict sub-key).
+        if "." in sub:
+            raise ValueError(f"Unknown config key: {path}")
+        sub_types = _CONFIG_DICT_KEYS[top]
+        if sub not in sub_types:
+            raise ValueError(f"Unknown config key: {path}")
+        return top, sub, sub_types[sub]
+
+    raise ValueError(f"Unknown config key: {top}")
+
+
+def _coerce(raw: str, py_type: type) -> Any:
+    """Parse *raw* into *py_type*, raising ``ValueError`` on failure."""
+    if py_type is bool:
+        lower = raw.lower()
+        if lower in ("true", "1"):
+            return True
+        if lower in ("false", "0"):
+            return False
+        raise ValueError(f"Expected bool, got {raw!r}")
+    if py_type is int:
+        try:
+            return int(raw)
+        except ValueError:
+            raise ValueError(f"Expected int, got {raw!r}") from None
+    if py_type is float:
+        try:
+            return float(raw)
+        except ValueError:
+            raise ValueError(f"Expected float, got {raw!r}") from None
+    if py_type is str:
+        return raw
+    raise ValueError(f"Expected {py_type.__name__}, got {raw!r}")
+
+
+def _load_raw_overrides(ws: Workspace) -> dict:
+    """Read the raw JSON from *ws.config_path*, or return ``{}``."""
+    if not ws.config_path.exists():
+        return {}
+    return json.loads(ws.config_path.read_text(encoding="utf-8"))
+
+
+def _format_value(value: Any, py_type: type) -> str:
+    """Format *value* for display according to *py_type*."""
+    if py_type is str:
+        return repr(value)
+    if py_type is float:
+        # Always use str() so e.g. 600.0 prints as "600.0".
+        return str(value)
+    if py_type is bool:
+        return str(value).lower()
+    # int and others
+    return str(value)
+
+
+def cmd_config_show(args: argparse.Namespace) -> int:
+    """Print the effective configuration."""
+    ws = _workspace(args)
+    if (rc := _require_workspace(ws)) is not None:
+        return rc
+
+    config = ws.load_config()
+    raw = _load_raw_overrides(ws)
+    config_dict = config.to_dict()
+
+    print(f"# {ws.config_path}")
+
+    # Scalars.
+    for key, py_type in _CONFIG_SCALAR_KEYS.items():
+        value = getattr(config, key)
+        suffix = ""
+        if key not in raw:
+            suffix = "  (default)"
+        print(f"  {key}: {_format_value(value, py_type)}  ({py_type.__name__}){suffix}")
+
+    # Dict sections.
+    for top, sub_types in _CONFIG_DICT_KEYS.items():
+        print()
+        print(f"  {top}:")
+        raw_top = raw.get(top, {}) if isinstance(raw.get(top), dict) else {}
+        for sub_key, py_type in sub_types.items():
+            value = config_dict[top][sub_key]
+            suffix = ""
+            if sub_key not in raw_top:
+                suffix = "  (default)"
+            print(f"    {sub_key}: {_format_value(value, py_type)}{suffix}")
+
+    # pr_reviewers (read-only, not configurable via set).
+    print()
+    print(f"  pr_reviewers: {config_dict.get('pr_reviewers', [])}")
+
+    return 0
+
+
+def cmd_config_get(args: argparse.Namespace) -> int:
+    """Look up a single config value by dotted path."""
+    ws = _workspace(args)
+    if (rc := _require_workspace(ws)) is not None:
+        return rc
+
+    config = ws.load_config()
+
+    try:
+        top, sub, py_type = _validate_known_path(args.key)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+    value = getattr(config, top) if sub is None else getattr(config, top)[sub]
+
+    print(_format_value(value, py_type))
+    return 0
+
+
+def cmd_config_set(args: argparse.Namespace) -> int:
+    """Set a config value by dotted path."""
+    ws = _workspace(args)
+    if (rc := _require_workspace(ws)) is not None:
+        return rc
+
+    try:
+        top, sub, py_type = _validate_known_path(args.key)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+    try:
+        coerced = _coerce(args.value, py_type)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+    config = ws.load_config()
+
+    if sub is None:
+        setattr(config, top, coerced)
+    else:
+        getattr(config, top)[sub] = coerced
+
+    ws.save_config(config)
+
+    if top in _OPENSCODE_AFFECTED:
+        path = opencode.write_opencode_config(ws, config)
+        print(f"Regenerated {path}")
+
+    print(f"Set {args.key} = {_format_value(coerced, py_type)}")
+    return 0

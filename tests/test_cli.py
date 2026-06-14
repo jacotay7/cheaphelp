@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import datetime
 import json
 import re
@@ -538,6 +539,110 @@ def test_run_swallows_log_write_errors(
         blocker.rmdir()
 
 
+def _usage_data(
+    prompt_tokens: int = 0,
+    completion_tokens: int = 0,
+    total_tokens: int = 0,
+    cost_usd: float = 0.0,
+) -> SimpleNamespace:
+    """Build a UsageData-like SimpleNamespace for test stubs."""
+    return SimpleNamespace(
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=total_tokens,
+        cost_usd=cost_usd,
+    )
+
+
+def test_run_shows_cost_summary(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The cost summary is printed to stdout and the daily log when costs are non-zero."""
+    ws = _setup_workspace(tmp_path)
+
+    ud = _usage_data(prompt_tokens=1234, completion_tokens=567, total_tokens=1801, cost_usd=0.042)
+    repo = SimpleNamespace(
+        slug="octocat/hello",
+        issue_costs={
+            7: {
+                "responder": [_usage_data(prompt_tokens=200, completion_tokens=80, total_tokens=280, cost_usd=0.002)],
+                "planner": [_usage_data(prompt_tokens=400, completion_tokens=200, total_tokens=600, cost_usd=0.008)],
+                "worker": [
+                    _usage_data(prompt_tokens=400, completion_tokens=200, total_tokens=600, cost_usd=0.019),
+                    _usage_data(prompt_tokens=0, completion_tokens=0, total_tokens=0, cost_usd=0.0),
+                ],
+                "reviewer": [_usage_data(prompt_tokens=234, completion_tokens=87, total_tokens=321, cost_usd=0.002)],
+            },
+        },
+        cost=ud,
+    )
+
+    def fake_tick(
+        workspace: Workspace,
+        *,
+        dry_run: bool,
+        log: Callable[[str], None],
+        max_issues: int = 0,
+    ) -> SimpleNamespace:
+        log("hello-from-stub")
+        return SimpleNamespace(error=None, total_turns=3, repos=[repo], total_cost=ud)
+
+    monkeypatch.setattr(commands, "tick", fake_tick)
+
+    rc = main(["--home", str(ws.home), "run"])
+    assert rc == 0
+
+    captured = capsys.readouterr().out
+    assert "Cost: $0.042 (1,234 prompt + 567 completion tokens)" in captured
+    assert (
+        "octocat/hello#7:   $0.031  (responder $0.002, planner $0.008, worker x2 $0.019, reviewer $0.002)" in captured
+    )
+
+    # Also check the daily log contains the cost lines.
+    log_path = ws.logs_dir / f"run-{datetime.datetime.now(datetime.timezone.utc).date().isoformat()}.log"
+    assert log_path.exists()
+    log_contents = log_path.read_text(encoding="utf-8")
+    assert "Cost: $0.042 (1,234 prompt + 567 completion tokens)" in log_contents
+    assert (
+        "octocat/hello#7:   $0.031  (responder $0.002, planner $0.008, worker x2 $0.019, reviewer $0.002)"
+        in log_contents
+    )
+
+
+def test_run_no_cost_when_zero(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With zero costs (default UsageData), no cost line is emitted to stdout or log."""
+    ws = _setup_workspace(tmp_path)
+
+    def fake_tick(
+        workspace: Workspace,
+        *,
+        dry_run: bool,
+        log: Callable[[str], None],
+        max_issues: int = 0,
+    ) -> SimpleNamespace:
+        log("hello-from-stub")
+        return SimpleNamespace(error=None, total_turns=0, repos=[], total_cost=_usage_data())
+
+    monkeypatch.setattr(commands, "tick", fake_tick)
+
+    rc = main(["--home", str(ws.home), "run"])
+    assert rc == 0
+
+    captured = capsys.readouterr().out
+    assert "Cost:" not in captured
+
+    log_path = ws.logs_dir / f"run-{datetime.datetime.now(datetime.timezone.utc).date().isoformat()}.log"
+    if log_path.exists():
+        log_contents = log_path.read_text(encoding="utf-8")
+        assert "Cost:" not in log_contents
+
+
 # --- status ----------------------------------------------------------------
 # Test-only token string written into the workspace `.env` by the status
 # tests. A real `GITHUB_TOKEN` is never read or sent anywhere in tests; this
@@ -916,6 +1021,135 @@ def test_status_no_workspace_exits_1(
     assert "No workspace" in err
 
 
+def test_status_shows_costs_flag(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``cheaphelp status --costs`` shows the cumulative cost for each issue."""
+    ws = _setup_workspace(tmp_path)
+    _seed_workspace_env(ws, token=_TEST_TOKEN)
+
+    Registry(ws.registry_path).add(RepoEntry(owner="octocat", name="hello", enabled=True))
+
+    # Seed a cost.json for issue #7.
+    issue_dir = ws.issue_dir("octocat", "hello", 7)
+    issue_dir.mkdir(parents=True, exist_ok=True)
+    (issue_dir / "cost.json").write_text(
+        json.dumps({"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15, "cost_usd": 0.0123}),
+        encoding="utf-8",
+    )
+
+    fake = _FakeGH("test-token")
+    fake.issues["octocat/hello"] = [
+        Issue(
+            number=7,
+            title="Costly issue",
+            body="",
+            state="open",
+            labels=[],
+            user="alice",
+            html_url="",
+        ),
+    ]
+
+    def _factory(token: str, **_kwargs: object) -> _FakeGH:
+        fake.token = token
+        return fake
+
+    monkeypatch.setattr(commands, "GitHubClient", _factory)
+
+    rc = main(["--home", str(ws.home), "status", "--costs"])
+    assert rc == 0
+
+    captured = capsys.readouterr().out
+    # The issue line must include the dollar amount.
+    assert "$0.012" in captured
+    assert "#7" in captured
+
+
+def test_status_no_costs_when_flag_absent(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without ``--costs``, the output has no cost column (no ``$`` on issue lines)."""
+    ws = _setup_workspace(tmp_path)
+    _seed_workspace_env(ws, token=_TEST_TOKEN)
+
+    Registry(ws.registry_path).add(RepoEntry(owner="octocat", name="hello", enabled=True))
+
+    fake = _FakeGH("test-token")
+    fake.issues["octocat/hello"] = [
+        Issue(
+            number=7,
+            title="Normal issue",
+            body="",
+            state="open",
+            labels=[],
+            user="alice",
+            html_url="",
+        ),
+    ]
+    fake.comments[("octocat/hello", 7)] = [
+        Comment(id=1, body="hi", user=fake.login, created_at=""),
+    ]
+
+    def _factory(token: str, **_kwargs: object) -> _FakeGH:
+        fake.token = token
+        return fake
+
+    monkeypatch.setattr(commands, "GitHubClient", _factory)
+
+    rc = main(["--home", str(ws.home), "status"])
+    assert rc == 0
+
+    captured = capsys.readouterr().out
+    # Issue line should not contain a dollar sign (no cost column).
+    issue_lines = [line for line in captured.splitlines() if "#7" in line]
+    assert issue_lines
+    assert "$" not in issue_lines[0]
+
+
+def test_status_costs_zero_when_no_cost_file(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``cheaphelp status --costs`` on an issue with no cost.json shows $0.000 (no crash)."""
+    ws = _setup_workspace(tmp_path)
+    _seed_workspace_env(ws, token=_TEST_TOKEN)
+
+    Registry(ws.registry_path).add(RepoEntry(owner="octocat", name="hello", enabled=True))
+    # No cost.json written.
+
+    fake = _FakeGH("test-token")
+    fake.issues["octocat/hello"] = [
+        Issue(
+            number=7,
+            title="No cost file",
+            body="",
+            state="open",
+            labels=[],
+            user="alice",
+            html_url="",
+        ),
+    ]
+
+    def _factory(token: str, **_kwargs: object) -> _FakeGH:
+        fake.token = token
+        return fake
+
+    monkeypatch.setattr(commands, "GitHubClient", _factory)
+
+    rc = main(["--home", str(ws.home), "status", "--costs"])
+    assert rc == 0
+
+    captured = capsys.readouterr().out
+    assert "$0.000" in captured
+    assert "#7" in captured
+
+
 # --- clean -----------------------------------------------------------------
 def test_cmd_clean_removes_closed_and_orphan_clones(
     tmp_path: Path,
@@ -991,3 +1225,496 @@ def test_cmd_run_skips_locked_issue_but_completes_tick(
     # ...but issue #7 was skipped because its lock was held.
     assert "#7" in combined
     assert "skipping" in combined
+
+
+# --- logs -------------------------------------------------------------------
+def _today_log_path(ws: Workspace) -> Path:
+    """Return the expected daily log path for today."""
+    return ws.logs_dir / f"run-{datetime.datetime.now(datetime.timezone.utc).date().isoformat()}.log"
+
+
+def test_logs_no_log_file_today_prints_message_and_exits_0(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """When today's log does not exist, ''logs'' prints a stderr message and exits 0."""
+    ws = _setup_workspace(tmp_path)
+    # Ensure the logs dir exists but contains no file for today.
+    ws.logs_dir.mkdir(parents=True, exist_ok=True)
+    today_path = _today_log_path(ws)
+    assert not today_path.exists()
+
+    rc = main(["--home", str(ws.home), "logs"])
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "(no log for today" in captured.err
+    assert captured.out.strip() == ""
+
+
+def test_logs_prints_tail_of_today_log(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """With a populated log file, ''logs'' prints the tail in file order."""
+    ws = _setup_workspace(tmp_path)
+    log_path = _today_log_path(ws)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    lines = [
+        "[2026-06-14 14:30:00] --- tick start ---",
+        "  \u00b7 octocat/hello#1: responding \u2026",
+        "  \u00b7 octocat/hello#1: running planner \u2026",
+        "[2026-06-14 14:31:00] --- tick start ---",
+        "  \u00b7 octocat/hello#2: responding \u2026",
+        "  \u00b7 octocat/hello#3: responding \u2026",
+    ]
+    log_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    rc = main(["--home", str(ws.home), "logs"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    out_lines = out.splitlines()
+
+    # Every written line appears in the output (since < 50 lines = the tail).
+    for line in lines:
+        assert line in out, f"missing expected line: {line!r}"
+    # Order in output matches order in the file.
+    for i in range(len(lines)):
+        assert out_lines[i] == lines[i], f"line {i} mismatch: {out_lines[i]!r} != {lines[i]!r}"
+
+
+def test_logs_issue_filter_returns_only_matching_lines(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """''--issue N'' filters to lines containing ''#N'' but still includes headers."""
+    ws = _setup_workspace(tmp_path)
+    log_path = _today_log_path(ws)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    lines = [
+        "[2026-06-14 14:30:00] --- tick start ---",
+        "  \u00b7 octocat/hello#7: planner",
+        "  \u00b7 octocat/hello#8: planner",
+        "[2026-06-14 14:31:00] --- tick start ---",
+    ]
+    log_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    rc = main(["--home", str(ws.home), "logs", "--issue", "7"])
+    assert rc == 0
+    out = capsys.readouterr().out
+
+    # Only lines containing "#7" pass the filter (f"#{n}" in line).
+    assert "octocat/hello#7" in out
+    # The #8 line must NOT appear (filtered out).
+    assert "octocat/hello#8" not in out
+    # Headers without any issue ref are also filtered out.
+    assert "--- tick start ---" not in out
+
+
+def test_logs_follow_exits_cleanly_on_keyboard_interrupt(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """''--follow'' exits 0 when ''time.sleep'' is interrupted by Ctrl-C."""
+    ws = _setup_workspace(tmp_path)
+    log_path = _today_log_path(ws)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text("one line\n", encoding="utf-8")
+
+    # Fake time.sleep to raise KeyboardInterrupt on first call.
+    def _sleep_that_raises(_secs: float) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(commands, "time", SimpleNamespace(sleep=_sleep_that_raises))
+
+    args = argparse.Namespace(home=str(ws.home), follow=True, issue=None)
+    rc = commands.cmd_logs(args)
+    assert rc == 0
+
+
+# --- blast-radius CLI flags ------------------------------------------------
+def test_repo_add_stores_max_diff_files_and_lines(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """`repo add --max-diff-files 50 --max-diff-lines 2000` stores both fields."""
+    ws = _setup_workspace(tmp_path)
+    rc = main(
+        [
+            "--home",
+            str(ws.home),
+            "repo",
+            "add",
+            "octocat/hello",
+            "--max-diff-files",
+            "50",
+            "--max-diff-lines",
+            "2000",
+        ],
+    )
+    assert rc == 0
+    capsys.readouterr()  # discard output
+
+    entry = Registry(ws.registry_path).find("octocat", "hello")
+    assert entry is not None
+    assert entry.max_diff_files == 50
+    assert entry.max_diff_lines == 2000
+
+
+def test_repo_add_default_limits_when_unspecified(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """`repo add` without flags uses the RepoEntry defaults (30, 1000)."""
+    ws = _setup_workspace(tmp_path)
+    rc = main(["--home", str(ws.home), "repo", "add", "octocat/hello"])
+    assert rc == 0
+    capsys.readouterr()
+
+    entry = Registry(ws.registry_path).find("octocat", "hello")
+    assert entry is not None
+    assert entry.max_diff_files == 30
+    assert entry.max_diff_lines == 1000
+
+
+def test_repo_update_updates_max_diff_files(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """`repo update --max-diff-files 100` changes only that field."""
+    ws = _setup_workspace(tmp_path)
+    Registry(ws.registry_path).add(
+        RepoEntry(
+            owner="octocat",
+            name="hello",
+            checks="ruff check",
+            autofix="ruff format",
+            max_diff_files=30,
+            max_diff_lines=1000,
+        ),
+    )
+    rc = main(
+        [
+            "--home",
+            str(ws.home),
+            "repo",
+            "update",
+            "octocat/hello",
+            "--max-diff-files",
+            "100",
+        ],
+    )
+    assert rc == 0
+    capsys.readouterr()
+
+    entry = Registry(ws.registry_path).find("octocat", "hello")
+    assert entry is not None
+    assert entry.max_diff_files == 100
+    assert entry.max_diff_lines == 1000
+    assert entry.checks == "ruff check"
+    assert entry.autofix == "ruff format"
+
+
+def test_repo_update_updates_max_diff_lines_and_preserves_others(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """`repo update --max-diff-lines 0` sets unlimited, preserves other fields."""
+    ws = _setup_workspace(tmp_path)
+    Registry(ws.registry_path).add(
+        RepoEntry(
+            owner="octocat",
+            name="hello",
+            checks="ruff check",
+            autofix="ruff format",
+            max_diff_files=30,
+            max_diff_lines=1000,
+        ),
+    )
+    rc = main(
+        [
+            "--home",
+            str(ws.home),
+            "repo",
+            "update",
+            "octocat/hello",
+            "--max-diff-lines",
+            "0",
+        ],
+    )
+    assert rc == 0
+    capsys.readouterr()
+
+    entry = Registry(ws.registry_path).find("octocat", "hello")
+    assert entry is not None
+    assert entry.max_diff_lines == 0
+    assert entry.max_diff_files == 30
+    assert entry.checks == "ruff check"
+    assert entry.autofix == "ruff format"
+
+
+def test_repo_set_with_new_flags_still_works(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """`repo set --max-diff-files 75` forwards the flag correctly."""
+    ws = _setup_workspace(tmp_path)
+    Registry(ws.registry_path).add(
+        RepoEntry(
+            owner="octocat",
+            name="hello",
+            checks="old-checks",
+            autofix="old-autofix",
+        ),
+    )
+    rc = main(
+        [
+            "--home",
+            str(ws.home),
+            "repo",
+            "set",
+            "octocat/hello",
+            "--max-diff-files",
+            "75",
+        ],
+    )
+    assert rc == 0
+    capsys.readouterr()
+
+    entry = Registry(ws.registry_path).find("octocat", "hello")
+    assert entry is not None
+    assert entry.max_diff_files == 75
+    assert entry.max_diff_lines == 1000
+    assert entry.checks == "old-checks"
+    assert entry.autofix == "old-autofix"
+
+
+# --- config ------------------------------------------------------------------
+def test_config_show_prints_header_and_default_marker(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """`config show` prints header, scalars and a ``(default)`` marker."""
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    # Write a minimal config so un-set keys show the (default) marker.
+    ws.config_path.write_text(json.dumps({"version": 1}) + "\n")
+    rc = main(["--home", str(ws.home), "config", "show"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "# " in out
+    assert "config.json" in out.splitlines()[0]
+    assert "agent_timeout:" in out
+    assert "(default)" in out
+
+
+def test_config_get_scalar_returns_value(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """`config get agent_timeout` prints ``600.0`` and exits 0."""
+    ws = _setup_workspace(tmp_path)
+    rc = main(["--home", str(ws.home), "config", "get", "agent_timeout"])
+    assert rc == 0
+    out = capsys.readouterr().out.strip()
+    assert out == "600.0"
+
+
+def test_config_get_models_subkey(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """`config get models.worker` prints the model string and exits 0."""
+    ws = _setup_workspace(tmp_path)
+    rc = main(["--home", str(ws.home), "config", "get", "models.worker"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "deepseek" in out
+
+
+def test_config_get_unknown_key_exits_2(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """`config get nonexistent.key` exits 2 with an error on stderr."""
+    ws = _setup_workspace(tmp_path)
+    rc = main(["--home", str(ws.home), "config", "get", "nonexistent.key"])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "Unknown config key: nonexistent" in err
+
+
+def test_config_set_scalar_persists(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """`config set agent_timeout 300` persists to config.json."""
+    ws = _setup_workspace(tmp_path)
+    rc = main(["--home", str(ws.home), "config", "set", "agent_timeout", "300"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Set agent_timeout" in out
+
+    config = ws.load_config()
+    assert config.agent_timeout == 300.0
+
+    raw = json.loads(ws.config_path.read_text(encoding="utf-8"))
+    assert raw["agent_timeout"] == 300.0
+
+
+def test_config_set_models_regenerates_opencode(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """`config set models.worker` updates the model and regenerates opencode.json."""
+    ws = _setup_workspace(tmp_path)
+    rc = main(
+        [
+            "--home",
+            str(ws.home),
+            "config",
+            "set",
+            "models.worker",
+            "openrouter/some/model",
+        ],
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Set models.worker" in out
+    assert "Regenerated" in out
+
+    assert ws.opencode_config_path.exists()
+    opencode_cfg = json.loads(ws.opencode_config_path.read_text(encoding="utf-8"))
+    assert opencode_cfg["agent"]["worker"]["model"] == "openrouter/some/model"
+
+
+def test_config_set_bool(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """`config set prune_work_clones false` correctly sets the bool."""
+    ws = _setup_workspace(tmp_path)
+
+    rc = main(
+        [
+            "--home",
+            str(ws.home),
+            "config",
+            "set",
+            "prune_work_clones",
+            "false",
+        ],
+    )
+    assert rc == 0
+    capsys.readouterr()  # discard output
+    config = ws.load_config()
+    assert config.prune_work_clones is False
+
+    # Round-trip: set back to true.
+    rc = main(
+        [
+            "--home",
+            str(ws.home),
+            "config",
+            "set",
+            "prune_work_clones",
+            "true",
+        ],
+    )
+    assert rc == 0
+    capsys.readouterr()  # discard output
+    config = ws.load_config()
+    assert config.prune_work_clones is True
+
+
+def test_config_set_type_mismatch_exits_2(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """`config set agent_timeout notanumber` exits 2 and does not change the value."""
+    ws = _setup_workspace(tmp_path)
+    assert ws.load_config().agent_timeout == 600.0
+
+    rc = main(
+        [
+            "--home",
+            str(ws.home),
+            "config",
+            "set",
+            "agent_timeout",
+            "notanumber",
+        ],
+    )
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "Expected float" in err
+
+    # Value must not have changed.
+    assert ws.load_config().agent_timeout == 600.0
+
+
+def test_config_show_includes_models_and_variants_sections(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """`config show` lists both ``models:`` and ``variants:`` sections with roles."""
+    ws = _setup_workspace(tmp_path)
+    rc = main(["--home", str(ws.home), "config", "show"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "models:" in out
+    assert "variants:" in out
+    # At least one role appears under each section (default config has "worker" in both).
+    assert "worker:" in out
+
+
+def test_config_get_variants_subkey(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """`config get variants.worker` prints the variant and exits 0."""
+    ws = _setup_workspace(tmp_path)
+    rc = main(["--home", str(ws.home), "config", "get", "variants.worker"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "max" in out
+
+
+def test_config_set_variants_regenerates_opencode(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """`config set variants.worker` triggers opencode.json regeneration."""
+    ws = _setup_workspace(tmp_path)
+    rc = main(
+        [
+            "--home",
+            str(ws.home),
+            "config",
+            "set",
+            "variants.worker",
+            "bogusvariant",
+        ],
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Set variants.worker" in out
+    assert "Regenerated" in out
+
+    # Confirm the variant was written.
+    config = ws.load_config()
+    assert config.variants["worker"] == "bogusvariant"
+
+
+def test_config_no_workspace_exits_1(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """`config show` on an uninitialised workspace exits 1 with ``No workspace``."""
+    ws = Workspace(tmp_path)  # NOTE: no ws.ensure() / ws.save_config()
+    rc = main(["--home", str(ws.home), "config", "show"])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "No workspace" in err
