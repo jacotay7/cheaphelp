@@ -165,12 +165,39 @@ def get_parser() -> argparse.ArgumentParser:
     p_dis.set_defaults(func=lambda a: commands.cmd_repo_toggle(a, enabled=False))
 
     # run
-    p_run = subparsers.add_parser("run", help="Run one orchestrator tick.")
-    p_run.add_argument("--once", action="store_true", help="Run a single tick (default behaviour).")
+    p_run = subparsers.add_parser("run", help="Run the orchestrator. Default: one tick.")
     p_run.add_argument(
         "--dry-run",
         action="store_true",
-        help="Report what would happen without acting.",
+        help="Report what would happen without acting (applies to every tick in a multi-tick run).",
+    )
+    p_run.add_argument(
+        "-n",
+        "--num-ticks",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Run exactly N ticks, sleeping --sleep seconds between each (default 1). "
+        "Mutually exclusive with --continuous.",
+    )
+    p_run.add_argument(
+        "--continuous",
+        action="store_true",
+        help="Run until a tick produces no work, capped at --max-ticks. Mutually exclusive with --num-ticks.",
+    )
+    p_run.add_argument(
+        "--max-ticks",
+        type=int,
+        default=20,
+        metavar="N",
+        help="Hard cap on total ticks when --continuous is used (default 20). Ignored when --num-ticks is set.",
+    )
+    p_run.add_argument(
+        "--sleep",
+        type=float,
+        default=30.0,
+        metavar="N",
+        help="Seconds to sleep between ticks in multi-tick mode (default 30).",
     )
     p_run.add_argument(
         "--max-issues",
