@@ -99,6 +99,30 @@ def test_prune_work_clones_default_and_roundtrip() -> None:
     assert Config.from_dict(cfg.to_dict()).prune_work_clones is False
 
 
+def test_retry_attempts_default_and_roundtrip() -> None:
+    # Default when constructed with no args / absent from the on-disk dict.
+    assert Config().retry_attempts == 3
+    assert Config.from_dict({}).retry_attempts == 3
+    # User override is honoured by from_dict and preserved by to_dict.
+    cfg = Config.from_dict({"retry_attempts": 5})
+    assert cfg.retry_attempts == 5
+    assert Config.from_dict(cfg.to_dict()).retry_attempts == 5
+    # String values are coerced via int(...).
+    assert Config.from_dict({"retry_attempts": "4"}).retry_attempts == 4
+
+
+def test_retry_base_delay_default_and_roundtrip() -> None:
+    # Default when constructed with no args / absent from the on-disk dict.
+    assert Config().retry_base_delay == 1.0
+    assert Config.from_dict({}).retry_base_delay == 1.0
+    # User override is honoured by from_dict and preserved by to_dict.
+    cfg = Config.from_dict({"retry_base_delay": 2.5})
+    assert cfg.retry_base_delay == 2.5
+    assert Config.from_dict(cfg.to_dict()).retry_base_delay == 2.5
+    # String values are coerced via float(...).
+    assert Config.from_dict({"retry_base_delay": "0.5"}).retry_base_delay == 0.5
+
+
 def _make_clone(ws: Workspace, name: str) -> Path:
     """Create a fake clone directory (with a .git marker) under the workspace."""
     path = ws.clones_dir / name

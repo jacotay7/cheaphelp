@@ -120,6 +120,11 @@ class Config:
     # How many times a worker task may run before a timeout escalates it to
     # needs-human. A timed-out task is reset to pending and retried until this.
     max_task_attempts: int = 2
+    # Retry policy for transient GitHub / OpenRouter failures. Each call
+    # retries up to `retry_attempts` times with exponential backoff starting
+    # from `retry_base_delay` (seconds), jittered ±25%.
+    retry_attempts: int = 3
+    retry_base_delay: float = 1.0
     # Remove a per-issue build clone once its issue closes (state is kept). Each
     # tick prunes the clones of closed issues for the repos it processes.
     prune_work_clones: bool = True
@@ -140,6 +145,8 @@ class Config:
             max_issues_per_tick=int(data.get("max_issues_per_tick", 0)),
             max_tasks_per_tick=int(data.get("max_tasks_per_tick", 0)),
             max_task_attempts=int(data.get("max_task_attempts", 2)),
+            retry_attempts=int(data.get("retry_attempts", 3)),
+            retry_base_delay=float(data.get("retry_base_delay", 1.0)),
             prune_work_clones=bool(data.get("prune_work_clones", True)),
         )
 
@@ -158,6 +165,8 @@ class Config:
             "max_issues_per_tick": self.max_issues_per_tick,
             "max_tasks_per_tick": self.max_tasks_per_tick,
             "max_task_attempts": self.max_task_attempts,
+            "retry_attempts": self.retry_attempts,
+            "retry_base_delay": self.retry_base_delay,
             "prune_work_clones": self.prune_work_clones,
         }
 
