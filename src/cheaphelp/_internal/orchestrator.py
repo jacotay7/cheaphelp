@@ -70,6 +70,7 @@ class RepoReport:
 
     slug: str
     issues_considered: int = 0
+    issues_skipped: int = 0  # locked by a concurrent tick
     turns_taken: int = 0
     actions: list[str] = field(default_factory=list)
     error: str | None = None
@@ -326,26 +327,38 @@ def _process_repo(
         return report
 
     # Clone once so read-only agents (responder, planner) can read the codebase.
+    # Serialise the fetch/reset across overlapping ticks (the clone dir is shared).
     cwd = workspace.home
     if not _is_mock():
         try:
-            cwd = ensure_clone(workspace.clone_path(repo.owner, repo.name), repo, token=token)
+            with RunLock(workspace.clone_lock_path(repo.owner, repo.name), blocking=True):
+                cwd = ensure_clone(workspace.clone_path(repo.owner, repo.name), repo, token=token)
         except Exception as exc:  # noqa: BLE001
             report.error = f"clone failed: {exc}"
             log(f"  ! {repo.slug}: clone failed: {exc}")
             return report
 
     for stage, issue, comments in work:
-        try:
-            if stage == "responder":
-                _run_responder(gh, workspace, config, repo, issue, comments, bot_login, cwd, log, report)
-            elif stage == "planner":
-                _run_planner(gh, workspace, config, repo, issue, cwd, log, report)
-            elif stage == "build":
-                _run_build(gh, workspace, config, repo, issue, token, log, report)
-        except Exception as exc:  # noqa: BLE001 - one issue's failure must not abort the tick
-            log(f"  ! {repo.slug}#{issue.number}: {stage} crashed: {_short_exc(exc)}")
-            report.actions.append(f"#{issue.number}: {stage} crashed")
+        # Per-issue lock: if another tick is already on this issue, skip it (don't
+        # block) and move to the next so concurrent ticks make progress.
+        with RunLock(workspace.issue_lock_path(repo.owner, repo.name, issue.number)) as issue_lock:
+            if not issue_lock.acquired:
+                pid = issue_lock.holder_pid
+                suffix = f" (PID {pid})" if pid is not None else ""
+                log(f"  · {repo.slug}#{issue.number}: already being worked on{suffix}; skipping")
+                report.issues_skipped += 1
+                report.actions.append(f"#{issue.number}: skipped (in progress elsewhere)")
+                continue
+            try:
+                if stage == "responder":
+                    _run_responder(gh, workspace, config, repo, issue, comments, bot_login, cwd, log, report)
+                elif stage == "planner":
+                    _run_planner(gh, workspace, config, repo, issue, cwd, log, report)
+                elif stage == "build":
+                    _run_build(gh, workspace, config, repo, issue, token, log, report)
+            except Exception as exc:  # noqa: BLE001 - one issue's failure must not abort the tick
+                log(f"  ! {repo.slug}#{issue.number}: {stage} crashed: {_short_exc(exc)}")
+                report.actions.append(f"#{issue.number}: {stage} crashed")
 
     return report
 
@@ -357,56 +370,52 @@ def tick(
     log: Logger | None = None,
     max_issues: int = 0,
 ) -> TickReport:
-    """Run one orchestrator tick across all enabled repositories."""
+    """Run one orchestrator tick across all enabled repositories.
+
+    Ticks may overlap: rather than a single global lock, each issue is guarded by
+    its own lock so a long build on one issue never blocks work on another.
+    """
     log = log or (lambda _msg: None)
     report = TickReport(dry_run=dry_run)
 
-    with RunLock(workspace.run_lock_path) as lock:
-        if not lock.acquired:
-            pid = lock.holder_pid
-            suffix = f" (PID {pid})" if pid is not None else ""
-            log(f"Another tick is already running{suffix}; skipping.")
-            report.skipped = True
-            return report
-
-        if not workspace.exists():
-            report.error = "workspace not initialised; run `cheaphelp init` first"
-            return report
-
-        load_into_environ(workspace.env_path)
-        config = workspace.load_config()
-        token = os.environ.get(GITHUB_TOKEN_KEY, "")
-
-        if not token:
-            report.error = f"{GITHUB_TOKEN_KEY} not set; add it to {workspace.env_path}"
-            return report
-        if not _is_mock() and not os.environ.get(OPENROUTER_API_KEY):
-            log(f"  (warning: {OPENROUTER_API_KEY} not set; agent calls will fail)")
-
-        repos = [r for r in Registry(workspace.registry_path).load() if r.enabled]
-        if not repos:
-            report.error = "no enabled repositories registered; use `cheaphelp repo add owner/name`"
-            return report
-
-        try:
-            with GitHubClient(token) as gh:
-                report.bot_login = gh.authenticated_login()
-                log(f"acting as @{report.bot_login} ({'dry-run' if dry_run else 'live'})")
-                for repo in repos:
-                    report.repos.append(
-                        _process_repo(
-                            gh,
-                            workspace,
-                            config,
-                            repo,
-                            report.bot_login,
-                            token,
-                            dry_run=dry_run,
-                            log=log,
-                            max_issues=max_issues,
-                        ),
-                    )
-        except Exception as exc:  # noqa: BLE001 - top-level guard for the tick
-            report.error = str(exc)
-
+    if not workspace.exists():
+        report.error = "workspace not initialised; run `cheaphelp init` first"
         return report
+
+    load_into_environ(workspace.env_path)
+    config = workspace.load_config()
+    token = os.environ.get(GITHUB_TOKEN_KEY, "")
+
+    if not token:
+        report.error = f"{GITHUB_TOKEN_KEY} not set; add it to {workspace.env_path}"
+        return report
+    if not _is_mock() and not os.environ.get(OPENROUTER_API_KEY):
+        log(f"  (warning: {OPENROUTER_API_KEY} not set; agent calls will fail)")
+
+    repos = [r for r in Registry(workspace.registry_path).load() if r.enabled]
+    if not repos:
+        report.error = "no enabled repositories registered; use `cheaphelp repo add owner/name`"
+        return report
+
+    try:
+        with GitHubClient(token) as gh:
+            report.bot_login = gh.authenticated_login()
+            log(f"acting as @{report.bot_login} ({'dry-run' if dry_run else 'live'})")
+            for repo in repos:
+                report.repos.append(
+                    _process_repo(
+                        gh,
+                        workspace,
+                        config,
+                        repo,
+                        report.bot_login,
+                        token,
+                        dry_run=dry_run,
+                        log=log,
+                        max_issues=max_issues,
+                    ),
+                )
+    except Exception as exc:  # noqa: BLE001 - top-level guard for the tick
+        report.error = str(exc)
+
+    return report

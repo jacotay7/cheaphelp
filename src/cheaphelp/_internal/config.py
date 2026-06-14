@@ -211,9 +211,21 @@ class Workspace:
         return self.home / "logs"
 
     @property
+    def locks_dir(self) -> Path:
+        return self.home / "locks"
+
+    @property
     def run_lock_path(self) -> Path:
         """Path of the `fcntl`-locked file that serialises orchestrator ticks."""
         return self.home / "run.lock"
+
+    def issue_lock_path(self, owner: str, repo: str, number: int) -> Path:
+        """Per-issue lock so concurrent ticks can work on different issues."""
+        return self.locks_dir / f"{owner}__{repo}__issue-{number}.lock"
+
+    def clone_lock_path(self, owner: str, repo: str) -> Path:
+        """Lock serialising fetch/reset of the shared read-only clone."""
+        return self.locks_dir / f"{owner}__{repo}__clone.lock"
 
     @property
     def all_dirs(self) -> list[Path]:
@@ -224,6 +236,7 @@ class Workspace:
             self.state_dir,
             self.clones_dir,
             self.logs_dir,
+            self.locks_dir,
         ]
 
     # --- lifecycle ---------------------------------------------------------

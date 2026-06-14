@@ -1,8 +1,16 @@
-"""Workspace-level exclusive lock to serialise orchestrator ticks.
+"""File-based exclusive locks for the orchestrator.
 
-Uses `fcntl.flock(LOCK_EX | LOCK_NB)` on a file under the workspace so the
-kernel releases the lock automatically when the holding process exits — a
-SIGKILL of the holder cannot wedge future runs.
+Uses `fcntl.flock` on a file under the workspace so the kernel releases the
+lock automatically when the holding process exits — a SIGKILL of the holder
+cannot wedge future runs.
+
+Two modes:
+
+- non-blocking (default): `acquired` is False on contention, so the caller can
+  skip the locked work and move on (per-issue locks let concurrent ticks work
+  on *different* issues without colliding).
+- blocking: wait until the lock is free, then acquire it (used to serialise the
+  shared read-only clone's fetch/reset across overlapping ticks).
 """
 
 from __future__ import annotations
@@ -14,15 +22,17 @@ from pathlib import Path
 
 
 class RunLock:
-    """Exclusive non-blocking lock on a workspace's `run.lock` file.
+    """Exclusive `fcntl` lock on a file, usable as a context manager.
 
-    Use as a context manager. After `__enter__`, `acquired` is True iff this
-    process now holds the lock; on contention it is False and the existing
-    tick should skip and exit 0.
+    After `__enter__`, `acquired` is True iff this process now holds the lock.
+    With `blocking=False` (the default) contention leaves `acquired` False so the
+    caller can skip; with `blocking=True` `__enter__` waits until the lock is
+    free and `acquired` is always True (barring an `os.open` failure).
     """
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, *, blocking: bool = False) -> None:
         self.path = path
+        self.blocking = blocking
         self.fd: int | None = None
         self.acquired: bool = False
 
@@ -33,9 +43,10 @@ class RunLock:
             self.fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o644)
         except OSError:
             return self
+        flags = fcntl.LOCK_EX if self.blocking else fcntl.LOCK_EX | fcntl.LOCK_NB
         try:
-            fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
+            fcntl.flock(self.fd, flags)
+        except OSError:  # BlockingIOError (NB contention) or other lock failure
             os.close(self.fd)
             self.fd = None
             return self

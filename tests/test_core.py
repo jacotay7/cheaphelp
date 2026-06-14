@@ -164,6 +164,35 @@ def test_process_repo_caps_work_to_max_issues(
     assert len(report.actions) == 5
 
 
+def test_process_repo_skips_locked_issue(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    monkeypatch.setenv("CHEAPHELP_AGENT_MOCK", "/dev/null")  # _is_mock(): skip the clone
+    repo = RepoEntry(owner="octocat", name="hello")
+    fake_gh = _FakeGitHub(1)
+
+    # Hold the issue lock in-process; _process_repo's own RunLock (a separate fd)
+    # then fails to acquire, so the issue is skipped without running an agent.
+    with RunLock(ws.issue_lock_path(repo.owner, repo.name, 1)) as held:
+        assert held.acquired
+        report = _process_repo(
+            fake_gh,  # ty: ignore[invalid-argument-type]
+            ws,
+            Config(),
+            repo,
+            "mybot",
+            "token",
+            dry_run=False,
+            log=lambda _m: None,
+        )
+    assert report.issues_considered == 1
+    assert report.issues_skipped == 1
+    assert report.turns_taken == 0
+
+
 def test_run_build_caps_tasks_per_tick(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -635,6 +664,19 @@ def test_classify_stages() -> None:
 # --- workspace lock --------------------------------------------------------
 def test_workspace_run_lock_path(tmp_path: Path) -> None:
     assert Workspace(tmp_path).run_lock_path == tmp_path / "run.lock"
+
+
+def test_workspace_lock_paths(tmp_path: Path) -> None:
+    ws = Workspace(tmp_path)
+    assert ws.locks_dir == tmp_path / "locks"
+    assert ws.issue_lock_path("o", "r", 5) == tmp_path / "locks" / "o__r__issue-5.lock"
+    assert ws.clone_lock_path("o", "r") == tmp_path / "locks" / "o__r__clone.lock"
+    assert ws.locks_dir in ws.all_dirs
+
+
+def test_run_lock_blocking_acquires_on_fresh_path(tmp_path: Path) -> None:
+    with RunLock(tmp_path / "b.lock", blocking=True) as lock:
+        assert lock.acquired is True
 
 
 def test_run_lock_acquires_on_fresh_path(tmp_path: Path) -> None:
