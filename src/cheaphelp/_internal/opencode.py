@@ -13,15 +13,20 @@ invocation that returns the agent's text output plus any parsed decision block.
 from __future__ import annotations
 
 import json
+import logging
 import os
+import random
 import re
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
 from cheaphelp._internal.config import Config, Workspace
 from cheaphelp._internal.templates import AGENT_ROLES, load_all_prompts
+
+_LOG = logging.getLogger(__name__)
 
 OPENCODE_SCHEMA = "https://opencode.ai/config.json"
 
@@ -260,6 +265,13 @@ def extract_decision(text: str) -> dict | None:
     return None
 
 
+def _compute_backoff(attempt: int, base_delay: float) -> float:
+    """Return the backoff for `attempt` (1-indexed) with ±25% jitter."""
+    base = base_delay * (2 ** (attempt - 1))
+    jitter = base * 0.25 * (2 * random.random() - 1)  # noqa: S311
+    return max(0.0, base + jitter)
+
+
 def _mock_result() -> AgentResult | None:
     """Return a canned result when CHEAPHELP_AGENT_MOCK points to a JSON file.
 
@@ -349,10 +361,44 @@ def run_agent(
             decision=extract_decision(proc.stdout),
         )
 
-    result = _invoke(prompt)
-    # The contract is a single final ```json block. If the agent exited cleanly
-    # but we couldn't parse one, give it exactly one more chance with a pointed
-    # reminder before the caller treats the turn as a failure.
-    if result.decision is None and result.returncode == 0:
-        result = _invoke(f"{prompt}\n\n{_REPROMPT_SUFFIX}")
-    return result
+    max_attempts = max(1, config.retry_attempts)
+    for attempt in range(1, max_attempts + 1):
+        try:
+            result = _invoke(prompt)
+        except subprocess.TimeoutExpired:
+            if attempt >= max_attempts:
+                raise
+            delay = _compute_backoff(attempt, config.retry_base_delay)
+            _LOG.warning(
+                "agent %s: attempt %d/%d failed: timeout, retrying in %.1fs",
+                role,
+                attempt,
+                max_attempts,
+                delay,
+            )
+            time.sleep(delay)
+            continue
+
+        if result.returncode != 0:
+            if attempt >= max_attempts:
+                return result
+            delay = _compute_backoff(attempt, config.retry_base_delay)
+            _LOG.warning(
+                "agent %s: attempt %d/%d failed: exit %d, retrying in %.1fs",
+                role,
+                attempt,
+                max_attempts,
+                result.returncode,
+                delay,
+            )
+            time.sleep(delay)
+            continue
+
+        # Clean exit.
+        if result.decision is not None:
+            return result
+        # Clean exit, no parseable decision: the existing single re-prompt
+        # for a format issue (NOT a transient retry).
+        return _invoke(f"{prompt}\n\n{_REPROMPT_SUFFIX}")
+
+    raise RuntimeError("retry loop exited without return")  # pragma: no cover

@@ -7,10 +7,15 @@ personal access token (classic or fine-grained) passed as a bearer token.
 from __future__ import annotations
 
 import contextlib
+import logging
+import random
+import time
 from dataclasses import dataclass
 from typing import Any
 
 import httpx
+
+_LOG = logging.getLogger(__name__)
 
 API_ROOT = "https://api.github.com"
 API_VERSION = "2022-11-28"
@@ -18,6 +23,8 @@ USER_AGENT = "cheaphelp"
 
 _HTTP_NO_CONTENT = 204
 _HTTP_ERROR = 400
+_HTTP_RATE_LIMITED = 429
+_HTTP_SERVER_ERROR = 500
 _PER_PAGE = 100
 
 
@@ -83,10 +90,21 @@ class GitHubClient:
             gh.list_open_issues("owner", "repo")
     """
 
-    def __init__(self, token: str, *, root: str = API_ROOT, timeout: float = 30.0) -> None:
+    def __init__(
+        self,
+        token: str,
+        *,
+        root: str = API_ROOT,
+        timeout: float = 30.0,
+        retry_attempts: int = 3,
+        retry_base_delay: float = 1.0,
+        client: httpx.Client | None = None,
+    ) -> None:
         if not token:
             raise GitHubError("A GitHub token is required (set GITHUB_TOKEN).")
-        self._client = httpx.Client(
+        self._retry_attempts = int(retry_attempts)
+        self._retry_base_delay = float(retry_base_delay)
+        self._client = client or httpx.Client(
             base_url=root,
             timeout=timeout,
             headers={
@@ -106,17 +124,84 @@ class GitHubClient:
     def close(self) -> None:
         self._client.close()
 
+    def _backoff_delay(self, attempt: int) -> float:
+        """Return the backoff for `attempt` (1-indexed) with ±25% jitter."""
+        base = self._retry_base_delay * (2 ** (attempt - 1))
+        jitter = base * 0.25 * (2 * random.random() - 1)  # noqa: S311  # jitter for backoff, not crypto
+        return max(0.0, base + jitter)
+
+    @staticmethod
+    def _parse_retry_after(header: str | None) -> float:
+        """Parse a Retry-After header (seconds), capped at 60s. 0.0 if absent/invalid."""
+        if not header:
+            return 0.0
+        try:
+            seconds = float(header)
+        except (TypeError, ValueError):
+            return 0.0
+        return min(max(0.0, seconds), 60.0)
+
     # --- low level ---------------------------------------------------------
+    def _error_for(self, method: str, path: str, response: httpx.Response) -> GitHubError:
+        """Build a GitHubError from a non-success response."""
+        detail = response.text
+        with contextlib.suppress(Exception):
+            detail = response.json().get("message", detail)
+        return GitHubError(f"{method} {path} -> {response.status_code}: {detail}")
+
     def _request(self, method: str, path: str, **kwargs: Any) -> Any:
-        response = self._client.request(method, path, **kwargs)
-        if response.status_code >= _HTTP_ERROR:
-            detail = response.text
-            with contextlib.suppress(Exception):
-                detail = response.json().get("message", detail)
-            raise GitHubError(f"{method} {path} -> {response.status_code}: {detail}")
-        if response.status_code == _HTTP_NO_CONTENT or not response.content:
-            return None
-        return response.json()
+        for attempt in range(1, self._retry_attempts + 1):
+            try:
+                response = self._client.request(method, path, **kwargs)
+            except (
+                httpx.ConnectError,
+                httpx.ConnectTimeout,
+                httpx.ReadTimeout,
+                httpx.RemoteProtocolError,
+            ) as exc:
+                if attempt >= self._retry_attempts:
+                    raise
+                delay = self._backoff_delay(attempt)
+                _LOG.warning(
+                    "%s %s: attempt %d/%d failed: %s, retrying in %.1fs",
+                    method,
+                    path,
+                    attempt,
+                    self._retry_attempts,
+                    exc,
+                    delay,
+                )
+                time.sleep(delay)
+                continue
+
+            if response.status_code == _HTTP_RATE_LIMITED or response.status_code >= _HTTP_SERVER_ERROR:
+                if attempt >= self._retry_attempts:
+                    raise self._error_for(method, path, response)
+                retry_after = (
+                    self._parse_retry_after(response.headers.get("Retry-After"))
+                    if response.status_code == _HTTP_RATE_LIMITED
+                    else 0.0
+                )
+                delay = max(self._backoff_delay(attempt), retry_after)
+                _LOG.warning(
+                    "%s %s: attempt %d/%d failed: %d, retrying in %.1fs",
+                    method,
+                    path,
+                    attempt,
+                    self._retry_attempts,
+                    response.status_code,
+                    delay,
+                )
+                time.sleep(delay)
+                continue
+
+            if response.status_code >= _HTTP_ERROR:
+                raise self._error_for(method, path, response)
+
+            if response.status_code == _HTTP_NO_CONTENT or not response.content:
+                return None
+            return response.json()
+        raise RuntimeError("retry loop exited without return")  # pragma: no cover
 
     def _paginate(self, path: str, **params: Any) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []

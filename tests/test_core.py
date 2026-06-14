@@ -3,16 +3,20 @@
 from __future__ import annotations
 
 import os
+import random
+from collections.abc import Callable
 from pathlib import Path
+from unittest.mock import patch
 from typing import cast
 
+import httpx
 import pytest
 
 from cheaphelp._internal import cleanup, gitutil, opencode, orchestrator, planner, responder, reviewer, systemd, worker
 from cheaphelp._internal.config import DEFAULT_AGENT_TIMEOUT, DEFAULT_MODELS, Config, Workspace
 from cheaphelp._internal.conventions import CONVENTIONS_FILES, read_conventions
 from cheaphelp._internal.env import parse_env, read_env_file, update_env_file
-from cheaphelp._internal.github import Comment, Issue
+from cheaphelp._internal.github import Comment, GitHubClient, GitHubError, Issue
 from cheaphelp._internal.lock import RunLock
 from cheaphelp._internal.orchestrator import _process_repo, _short_exc, classify, parse_depends_on
 from cheaphelp._internal.registry import Registry, RepoEntry, parse_slug
@@ -99,6 +103,224 @@ def test_prune_work_clones_default_and_roundtrip() -> None:
     cfg = Config.from_dict({"prune_work_clones": False})
     assert cfg.prune_work_clones is False
     assert Config.from_dict(cfg.to_dict()).prune_work_clones is False
+
+
+def test_retry_attempts_default_and_roundtrip() -> None:
+    # Default when constructed with no args / absent from the on-disk dict.
+    assert Config().retry_attempts == 3
+    assert Config.from_dict({}).retry_attempts == 3
+    # User override is honoured by from_dict and preserved by to_dict.
+    cfg = Config.from_dict({"retry_attempts": 5})
+    assert cfg.retry_attempts == 5
+    assert Config.from_dict(cfg.to_dict()).retry_attempts == 5
+    # String values are coerced via int(...).
+    assert Config.from_dict({"retry_attempts": "4"}).retry_attempts == 4
+
+
+def test_retry_base_delay_default_and_roundtrip() -> None:
+    # Default when constructed with no args / absent from the on-disk dict.
+    assert Config().retry_base_delay == 1.0
+    assert Config.from_dict({}).retry_base_delay == 1.0
+    # User override is honoured by from_dict and preserved by to_dict.
+    cfg = Config.from_dict({"retry_base_delay": 2.5})
+    assert cfg.retry_base_delay == 2.5
+    assert Config.from_dict(cfg.to_dict()).retry_base_delay == 2.5
+    # String values are coerced via float(...).
+    assert Config.from_dict({"retry_base_delay": "0.5"}).retry_base_delay == 0.5
+
+
+def _make_github_client(
+    handler: Callable[[httpx.Request], httpx.Response],
+    *,
+    root: str = "https://api.github.com",
+    timeout: float = 30.0,
+    retry_attempts: int = 3,
+    retry_base_delay: float = 1.0,
+) -> GitHubClient:
+    """Build a GitHubClient wired to an httpx.MockTransport (no network)."""
+    client = httpx.Client(base_url=root, transport=httpx.MockTransport(handler))
+    return GitHubClient(
+        "test-token",
+        root=root,
+        timeout=timeout,
+        retry_attempts=retry_attempts,
+        retry_base_delay=retry_base_delay,
+        client=client,
+    )
+
+
+# --- GitHubClient retry tests -----------------------------------------------
+def _make_counting_handler() -> tuple[list[httpx.Response], Callable]:
+    """Return (responses, handler) — the handler pops from *responses* each call.
+
+    Pop an ``httpx.Response`` to return, or raise the item if it is an exception class.
+    """
+    items: list[httpx.Response] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return items.pop(0)
+
+    return items, handler
+
+
+def test_request_retries_on_5xx_then_succeeds() -> None:
+    items, handler = _make_counting_handler()
+    items.append(httpx.Response(503))
+    items.append(httpx.Response(503))
+    items.append(httpx.Response(200, json={"ok": True}))
+    gh = _make_github_client(handler, retry_attempts=3, retry_base_delay=0.01)
+    result = gh._request("GET", "/test")
+    assert result == {"ok": True}
+    assert len(items) == 0  # all consumed
+
+
+def test_request_retries_on_429_then_succeeds() -> None:
+    items, handler = _make_counting_handler()
+    items.append(httpx.Response(429))
+    items.append(httpx.Response(429))
+    items.append(httpx.Response(200, json={"ok": True}))
+    gh = _make_github_client(handler, retry_attempts=3, retry_base_delay=0.01)
+    result = gh._request("GET", "/test")
+    assert result == {"ok": True}
+    assert len(items) == 0
+
+
+def test_request_does_not_retry_on_404() -> None:
+    items, handler = _make_counting_handler()
+    items.append(httpx.Response(404))
+    gh = _make_github_client(handler, retry_attempts=3, retry_base_delay=0.01)
+    with pytest.raises(GitHubError) as exc_info:
+        gh._request("GET", "/test")
+    assert "404" in str(exc_info.value)
+    assert len(items) == 0
+
+
+def test_request_does_not_retry_on_422() -> None:
+    items, handler = _make_counting_handler()
+    items.append(httpx.Response(422))
+    gh = _make_github_client(handler, retry_attempts=3, retry_base_delay=0.01)
+    with pytest.raises(GitHubError) as exc_info:
+        gh._request("GET", "/test")
+    assert "422" in str(exc_info.value)
+    assert len(items) == 0
+
+
+def test_request_retries_on_connect_error() -> None:
+    calls: list[int] = []
+
+    def handler_connect(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        if len(calls) < 3:
+            raise httpx.ConnectError("connection refused")
+        return httpx.Response(200, json={"ok": True})
+
+    gh = _make_github_client(handler_connect, retry_attempts=3, retry_base_delay=0.01)
+    result = gh._request("GET", "/test")
+    assert result == {"ok": True}
+    assert len(calls) == 3
+
+
+def test_request_exhausted_retries_raises_last_error() -> None:
+    items, handler = _make_counting_handler()
+    for _ in range(4):  # one more than needed
+        items.append(httpx.Response(503))
+    gh = _make_github_client(handler, retry_attempts=3, retry_base_delay=0.01)
+    with pytest.raises(GitHubError) as exc_info:
+        gh._request("GET", "/test")
+    assert "503" in str(exc_info.value)
+
+
+def test_request_exhausted_transport_raises_last_error() -> None:
+    calls: list[int] = []
+
+    def handler_timeout(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        raise httpx.ReadTimeout("timed out")
+
+    gh = _make_github_client(handler_timeout, retry_attempts=3, retry_base_delay=0.01)
+    with pytest.raises(httpx.ReadTimeout):
+        gh._request("GET", "/test")
+    assert len(calls) == 3
+
+
+def test_request_honors_retry_after() -> None:
+    sleeps: list[float] = []
+
+    def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    items, handler = _make_counting_handler()
+    items.append(httpx.Response(429, headers={"Retry-After": "5"}))
+    items.append(httpx.Response(200, json={"ok": True}))
+    gh = _make_github_client(handler, retry_attempts=3, retry_base_delay=0.0)
+
+    with patch("time.sleep", fake_sleep):
+        result = gh._request("GET", "/test")
+    assert result == {"ok": True}
+    assert len(sleeps) == 1
+    assert sleeps[0] >= 5.0
+
+
+def test_request_honors_retry_after_caps_at_60() -> None:
+    from unittest.mock import patch  # noqa: PLC0415
+
+    sleeps: list[float] = []
+
+    def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    items, handler = _make_counting_handler()
+    items.append(httpx.Response(429, headers={"Retry-After": "999"}))
+    items.append(httpx.Response(200, json={"ok": True}))
+    gh = _make_github_client(handler, retry_attempts=3, retry_base_delay=0.0)
+
+    with patch("time.sleep", fake_sleep):
+        result = gh._request("GET", "/test")
+    assert result == {"ok": True}
+    assert len(sleeps) == 1
+    assert sleeps[0] <= 60.0
+
+
+def test_request_no_sleep_on_last_attempt() -> None:
+    from unittest.mock import patch  # noqa: PLC0415
+
+    sleeps: list[float] = []
+
+    def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    items, handler = _make_counting_handler()
+    for _ in range(3):
+        items.append(httpx.Response(503))
+    gh = _make_github_client(handler, retry_attempts=3, retry_base_delay=0.01)
+
+    with patch("time.sleep", fake_sleep), pytest.raises(GitHubError):
+        gh._request("GET", "/test")
+    assert len(sleeps) == 2  # retry_attempts - 1
+
+
+def test_request_backoff_is_exponential() -> None:
+    from unittest.mock import patch  # noqa: PLC0415
+
+    random.seed(42)  # deterministic jitter
+    sleeps: list[float] = []
+
+    def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    items, handler = _make_counting_handler()
+    for _ in range(3):
+        items.append(httpx.Response(503))
+    gh = _make_github_client(handler, retry_attempts=3, retry_base_delay=1.0)
+
+    with patch("time.sleep", fake_sleep), pytest.raises(GitHubError):
+        gh._request("GET", "/test")
+    assert len(sleeps) == 2
+
+    # Attempt 1: base * 2^(0) = 1.0, jitter ±0.25
+    assert 0.75 <= sleeps[0] <= 1.25
+    # Attempt 2: base * 2^(1) = 2.0, jitter ±0.5
+    assert 1.5 <= sleeps[1] <= 2.5
 
 
 def _make_clone(ws: Workspace, name: str) -> Path:
@@ -818,6 +1040,192 @@ def test_run_agent_no_reprompt_when_decision_present(
     result = opencode.run_agent(ws, Config(), "worker", "do it", cwd=tmp_path)
     assert result.decision == {"status": "done"}
     assert len(calls) == 1  # no retry needed
+
+
+def test_run_agent_retries_on_nonzero_exit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    monkeypatch.setattr(opencode, "find_opencode", lambda _cfg: Path("opencode"))
+
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **_kwargs: object) -> object:
+        calls.append(cmd)
+        if len(calls) <= 2:
+            return SimpleNamespace(returncode=1, stdout="", stderr="boom")
+        return SimpleNamespace(returncode=0, stdout='```json\n{"status": "done"}\n```', stderr="")
+
+    monkeypatch.setattr(opencode.subprocess, "run", fake_run)
+    cfg = Config.from_dict({"retry_base_delay": 0.01})
+
+    result = opencode.run_agent(ws, cfg, "worker", "do it", cwd=tmp_path)
+    assert result.decision == {"status": "done"}
+    assert len(calls) == 3
+
+
+def test_run_agent_retries_on_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import subprocess  # noqa: PLC0415
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    monkeypatch.setattr(opencode, "find_opencode", lambda _cfg: Path("opencode"))
+
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **_kwargs: object) -> object:
+        calls.append(cmd)
+        if len(calls) <= 2:
+            raise subprocess.TimeoutExpired(cmd="opencode", timeout=1.0)
+        return SimpleNamespace(returncode=0, stdout='```json\n{"status": "done"}\n```', stderr="")
+
+    monkeypatch.setattr(opencode.subprocess, "run", fake_run)
+    cfg = Config.from_dict({"retry_base_delay": 0.01})
+
+    result = opencode.run_agent(ws, cfg, "worker", "do it", cwd=tmp_path)
+    assert result.decision == {"status": "done"}
+    assert len(calls) == 3
+
+
+def test_run_agent_exhausted_retries_returns_last_nonzero(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    monkeypatch.setattr(opencode, "find_opencode", lambda _cfg: Path("opencode"))
+
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **_kwargs: object) -> object:
+        calls.append(cmd)
+        return SimpleNamespace(returncode=2, stdout="", stderr="no good")
+
+    monkeypatch.setattr(opencode.subprocess, "run", fake_run)
+    cfg = Config.from_dict({"retry_base_delay": 0.01, "retry_attempts": 3})
+
+    result = opencode.run_agent(ws, cfg, "worker", "do it", cwd=tmp_path)
+    assert result.returncode == 2
+    assert result.ok is False
+    assert len(calls) == 3
+
+
+def test_run_agent_exhausted_timeout_raises(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import subprocess  # noqa: PLC0415
+
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    monkeypatch.setattr(opencode, "find_opencode", lambda _cfg: Path("opencode"))
+
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **_kwargs: object) -> object:
+        calls.append(cmd)
+        raise subprocess.TimeoutExpired(cmd="opencode", timeout=1.0)
+
+    monkeypatch.setattr(opencode.subprocess, "run", fake_run)
+    cfg = Config.from_dict({"retry_base_delay": 0.01, "retry_attempts": 3})
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        opencode.run_agent(ws, cfg, "worker", "do it", cwd=tmp_path)
+    assert len(calls) == 3
+
+
+def test_run_agent_no_retry_on_clean_exit_with_decision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    monkeypatch.setattr(opencode, "find_opencode", lambda _cfg: Path("opencode"))
+
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **_kwargs: object) -> object:
+        calls.append(cmd)
+        return SimpleNamespace(returncode=0, stdout='```json\n{"status": "done"}\n```', stderr="")
+
+    monkeypatch.setattr(opencode.subprocess, "run", fake_run)
+
+    result = opencode.run_agent(ws, Config(), "worker", "do it", cwd=tmp_path)
+    assert result.decision == {"status": "done"}
+    assert len(calls) == 1  # no retry, no re-prompt
+
+
+def test_run_agent_reprompt_does_not_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    monkeypatch.setattr(opencode, "find_opencode", lambda _cfg: Path("opencode"))
+
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **_kwargs: object) -> object:
+        calls.append(cmd)
+        stdout = "thinking out loud, no json" if len(calls) == 1 else '```json\n{"status": "done"}\n```'
+        return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(opencode.subprocess, "run", fake_run)
+
+    result = opencode.run_agent(ws, Config(), "worker", "do it", cwd=tmp_path)
+    assert result.decision == {"status": "done"}
+    assert len(calls) == 2  # re-prompt, not retry loop
+
+
+def test_run_agent_backoff_is_exponential(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import random  # noqa: PLC0415
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    random.seed(42)  # deterministic jitter
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    monkeypatch.setattr(opencode, "find_opencode", lambda _cfg: Path("opencode"))
+
+    calls: list[list[str]] = []
+    sleeps: list[float] = []
+
+    def fake_run(cmd: list[str], **_kwargs: object) -> object:
+        calls.append(cmd)
+        return SimpleNamespace(returncode=1, stdout="", stderr="boom")
+
+    def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr(opencode.subprocess, "run", fake_run)
+    monkeypatch.setattr(opencode.time, "sleep", fake_sleep)
+    cfg = Config.from_dict({"retry_base_delay": 1.0, "retry_attempts": 3})
+
+    result = opencode.run_agent(ws, cfg, "worker", "do it", cwd=tmp_path)
+    assert result.returncode == 1
+    assert len(calls) == 3
+    assert len(sleeps) == 2
+
+    # Attempt 1: base * 2^(0) = 1.0, jitter ±0.25
+    assert 0.75 <= sleeps[0] <= 1.25
+    # Attempt 2: base * 2^(1) = 2.0, jitter ±0.5
+    assert 1.5 <= sleeps[1] <= 2.5
 
 
 def test_build_opencode_config_shape() -> None:
