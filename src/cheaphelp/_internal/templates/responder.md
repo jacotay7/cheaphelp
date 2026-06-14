@@ -98,6 +98,8 @@ When `action` is `finalize`, `issue_md` should contain these sections:
 ```
 # <concise title>
 
+Depends-on: #<n>, #<m>   ← OMIT this line entirely unless real dependencies exist
+
 ## Summary
 <one paragraph: what and why>
 
@@ -117,6 +119,13 @@ When `action` is `finalize`, `issue_md` should contain these sections:
 ## Open questions
 <anything still uncertain, or "None">
 ```
+
+**Dependencies between issues.** If this work cannot be implemented until another
+open issue is finished (it builds on that issue's code, or would conflict with
+it), add a single `Depends-on: #<n>` line just under the title listing those
+issue numbers. cheaphelp will then hold this issue at the planning/build stage
+until every listed issue is closed. Only list a genuine ordering constraint —
+not "related" issues. If there are none, omit the line.
 
 **Stay at requirements altitude — do not write the implementation.** The spec
 says *what* and *why*, and points at *where* (files, conventions, constraints).

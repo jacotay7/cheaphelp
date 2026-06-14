@@ -15,6 +15,7 @@ Worker and reviewer stages are stubbed until their milestones land.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -37,6 +38,33 @@ _ACTIONABLE_STAGES = frozenset({"responder", "planner", "build"})
 
 def _is_mock() -> bool:
     return bool(os.environ.get("CHEAPHELP_AGENT_MOCK"))
+
+
+# A `Depends-on: #41, #42` line in an issue's issues.md declares cross-issue
+# ordering: cheaphelp holds the planner/build stage until those issues close.
+_DEPENDS_ON_RE = re.compile(r"^\s*depends[ -]on:\s*(.+)$", re.IGNORECASE | re.MULTILINE)
+
+
+def parse_depends_on(issue_md: str) -> list[int]:
+    """Return the issue numbers a spec declares it depends on (deduped, sorted)."""
+    numbers: set[int] = set()
+    for match in _DEPENDS_ON_RE.finditer(issue_md):
+        numbers.update(int(tok) for tok in re.findall(r"#?(\d+)", match.group(1)))
+    return sorted(numbers)
+
+
+def _unmet_dependencies(
+    workspace: Workspace,
+    repo: RepoEntry,
+    issue: Issue,
+    open_numbers: set[int],
+) -> list[int]:
+    """Dependencies of `issue` that are still open (so it must wait)."""
+    spec = workspace.issue_dir(repo.owner, repo.name, issue.number) / "issues.md"
+    if not spec.exists():
+        return []
+    deps = parse_depends_on(spec.read_text(encoding="utf-8"))
+    return [n for n in deps if n != issue.number and n in open_numbers]
 
 
 def classify(issue: Issue, comments: list, bot_login: str, config: Config) -> str:
@@ -304,12 +332,22 @@ def _process_repo(
         log(f"  ! {repo.slug}: failed to list issues: {exc}")
         return report
 
+    open_numbers = {issue.number for issue in issues}
     work: list[tuple[str, Issue, list]] = []
     for issue in issues:
         comments = gh.list_issue_comments(repo.owner, repo.name, issue.number)
         stage = classify(issue, comments, bot_login, config)
-        if stage in _ACTIONABLE_STAGES:
-            work.append((stage, issue, comments))
+        if stage not in _ACTIONABLE_STAGES:
+            continue
+        # Hold the planner/build stages until depended-on issues are closed.
+        if stage in {"planner", "build"}:
+            unmet = _unmet_dependencies(workspace, repo, issue, open_numbers)
+            if unmet:
+                deps = ", ".join(f"#{n}" for n in unmet)
+                log(f"  · {repo.slug}#{issue.number}: waiting on {deps} (open); deferring")
+                report.actions.append(f"#{issue.number}: waiting on {deps}")
+                continue
+        work.append((stage, issue, comments))
     report.issues_considered = len(work)
 
     if max_issues > 0 and len(work) > max_issues:
