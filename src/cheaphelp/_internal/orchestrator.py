@@ -20,7 +20,7 @@ import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from cheaphelp._internal import cleanup, gitutil, opencode, planner, responder, reviewer, worker
+from cheaphelp._internal import cleanup, gitutil, opencode, planner, responder, reviewer, rework, worker
 from cheaphelp._internal.config import Config, Workspace
 from cheaphelp._internal.env import GITHUB_TOKEN_KEY, OPENROUTER_API_KEY, load_into_environ
 from cheaphelp._internal.github import GitHubClient, Issue
@@ -33,7 +33,7 @@ Logger = Callable[[str], None]
 
 # Stages that the orchestrator will actually dispatch to an agent. Other
 # classify() return values are terminal / waiting / idle and are skipped.
-_ACTIONABLE_STAGES = frozenset({"responder", "planner", "build"})
+_ACTIONABLE_STAGES = frozenset({"responder", "planner", "build", "rework"})
 
 
 def _is_mock() -> bool:
@@ -71,7 +71,7 @@ def classify(issue: Issue, comments: list, bot_login: str, config: Config) -> st
     """Return the pipeline stage for an issue.
 
     Always returns a string; actionable stages are ``"responder"``, ``"planner"``,
-    ``"build"``; waiting/terminal stages are ``"rejected"``, ``"in-review"``,
+    ``"build"``, ``"rework"``; waiting/terminal stages are ``"rejected"``,
     ``"needs-human"``; the no-op case is ``"idle"``.
     """
     labels = set(issue.labels)
@@ -80,7 +80,7 @@ def classify(issue: Issue, comments: list, bot_login: str, config: Config) -> st
     if lab["rejected"] in labels:
         return "rejected"
     if lab["in_review"] in labels:
-        return "in-review"
+        return "rework"
     if lab["needs_human"] in labels:
         return "needs-human"
     if lab["planned"] in labels or lab["in_progress"] in labels:
@@ -313,6 +313,22 @@ def _run_build(gh, workspace, config, repo, issue, token, log, report) -> None: 
         report.actions.append(f"#{number}: blocked")
 
 
+def _run_rework(gh, workspace, config, repo, number, token, log, report) -> None:  # noqa: ANN001
+    """Rework stage: respond to unaddressed PR review feedback."""
+    log(f"  · {repo.slug}#{number}: running rework ({config.model_for('rework')})")
+    res = rework.run_rework(gh, workspace, config, repo, number, token=token)
+    report.turns_taken += 1
+    action = f"#{number}: rework {res.status}"
+    if res.error:
+        action += f" ({res.error})"
+    if res.committed:
+        action += " +commit"
+    if res.pushed:
+        action += " +push"
+    report.actions.append(action)
+    log(f"  > {repo.slug}{action}")
+
+
 def _process_repo(
     gh: GitHubClient,
     workspace: Workspace,
@@ -431,6 +447,8 @@ def _process_repo(
                     _run_planner(gh, workspace, config, repo, fresh_issue, cwd, log, report)
                 elif stage == "build":
                     _run_build(gh, workspace, config, repo, fresh_issue, token, log, report)
+                elif stage == "rework":
+                    _run_rework(gh, workspace, config, repo, fresh_issue.number, token, log, report)
             except Exception as exc:  # noqa: BLE001 - one issue's failure must not abort the tick
                 log(f"  ! {repo.slug}#{issue.number}: {stage} crashed: {_short_exc(exc)}")
                 report.actions.append(f"#{issue.number}: {stage} crashed")
