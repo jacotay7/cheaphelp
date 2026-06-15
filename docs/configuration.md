@@ -16,9 +16,10 @@ hand-editing JSON.
     "planner":   "openrouter/minimax/minimax-m3",
     "worker":    "openrouter/deepseek/deepseek-v4-flash",
     "reviewer":  "openrouter/minimax/minimax-m3",
-    "rework":    "openrouter/deepseek/deepseek-v4-flash"
+    "rework":    "openrouter/deepseek/deepseek-v4-flash",
+    "fixer":     "openrouter/deepseek/deepseek-v4-flash"
   },
-  "variants": { "responder": "max", "planner": "", "worker": "max", "reviewer": "", "rework": "max" },
+  "variants": { "responder": "max", "planner": "", "worker": "max", "reviewer": "", "rework": "max", "fixer": "max" },
   "sandbox": {
     "confine_to_workdir": true,
     "restrict_bash": true,
@@ -29,6 +30,7 @@ hand-editing JSON.
   "agent_timeout": 600,
   "daily_budget_usd": 0,
   "budget_warn_at": 0.80,
+  "quality_gate_fix_attempts": 1,
   "opencode_bin": "opencode"
 }
 ```
@@ -39,6 +41,10 @@ hand-editing JSON.
 - **`sandbox`** controls agent permissions; see [Sandboxing](sandboxing.md).
 - **`daily_budget_usd`** and **`budget_warn_at`** govern daily spend; see
   [Cost tracking](cost-tracking.md).
+- **`quality_gate_fix_attempts`** is how many times the **fixer** role attempts
+  to repair a failing quality gate (re-running the gate after each attempt)
+  before the issue is sent back to the planner; `0` skips the fixer entirely.
+  See [Pipeline](pipeline.md#quality-gate).
 
 After editing models, prompts, variants, or sandbox settings, run
 `cheaphelp agents sync` to regenerate the opencode config.

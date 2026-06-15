@@ -13,6 +13,7 @@ issue into a pipeline stage by its labels, and dispatches the right agent.
 | **Responder** | Talks to issue authors in the comment thread, refines scope, protects the repo's interests, and finalizes a clean `issues.md` (or rejects). Also re-engages issues that were stuck on `needs-human` once a person replies. | ✅ |
 | **Planner** | Turns `issues.md` into an ordered manifest of small tasks (`task.md` files). | ✅ |
 | **Workers** | Execute one task at a time on the issue branch, verify, commit, and write summaries. | ✅ |
+| **Fixer** | When the quality gate fails, makes one attempt to repair the working tree from the gate output (failing tests, lint, types) so it never escalates to a full re-plan. | ✅ |
 | **Reviewer** | Reviews the combined diff; either opens a PR for human approval or sends it back to the planner. | ✅ |
 | **Rework** | Watches open PRs (`cheaphelp:in-review`) for new human review feedback and pushes fixup commits to address it, or no-ops until there's something new. | ✅ |
 
@@ -23,6 +24,7 @@ issue into a pipeline stage by its labels, and dispatches the right agent.
 :ready / :needs-replan                  -> planner     issues.md -> tasks,        label :planned
 :planned, tasks pending                  -> worker      implement one task on the issue branch
 :planned, all tasks done                 -> quality gate -> reviewer  open PR (label :in-review) or replan
+                                            (gate fails -> fixer repairs + re-runs gate before replanning)
 :in-review                               -> rework      address new PR review feedback, or no-op
 :needs-human, human replied              -> responder   re-engage a stuck issue
 :needs-human, no new reply               -> (idle)      waiting on a person
@@ -43,9 +45,13 @@ commands inside the work clone:
    automatically. This resolves trivial issues (formatting, import order,
    `--fix`-able lint) cheaply, so they never escalate to a re-plan.
 2. **`checks`** (set with `--checks`) is the gate — e.g. `ruff check . && pytest`.
-   A **failing gate never becomes a PR**: the remaining failures are written to
-   the issue's `replan.md`, the issue is relabeled `needs-replan`, and the
-   planner produces a minimal corrective plan.
+   A **failing gate never becomes a PR**. On failure the **fixer** role gets one
+   (configurable) attempt to repair the working tree from the gate output, after
+   which the gate is re-run. Only if it *still* fails are the remaining failures
+   written to the issue's `replan.md`, the issue relabeled `needs-replan`, and the
+   planner asked for a minimal corrective plan. Set
+   `quality_gate_fix_attempts` to `0` in `config.json` to skip the fixer and fail
+   straight to a re-plan.
 
 Set them when registering: `cheaphelp repo add <slug> --autofix "…" --checks "…"`.
 Leave either empty to disable that step. Together they are the deterministic

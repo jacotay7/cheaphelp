@@ -29,9 +29,9 @@ All product code is under `src/cheaphelp/_internal/`:
 | `conventions.py` | reads `CHEAPHELP.md`/`AGENTS.md`/`CONTRIBUTING.md` into agent context |
 | `pr_state.py` | persists PR ↔ issue link state for the rework stage |
 | `opencode.py` | generate `opencode.json`, run agents headlessly (with `--variant`), parse decisions |
-| `templates/` | bundled agent prompts (responder, planner, worker, reviewer, rework) |
+| `templates/` | bundled agent prompts (responder, planner, worker, reviewer, rework, fixer) |
 | `tasks.py` | task manifest + per-issue task state store |
-| `responder.py` / `planner.py` / `worker.py` / `reviewer.py` / `rework.py` | per-role turn logic |
+| `responder.py` / `planner.py` / `worker.py` / `reviewer.py` / `rework.py` / `fixer.py` | per-role turn logic |
 | `orchestrator.py` | one tick of the state machine (`tick()`, `classify()`, stage dispatch) |
 | `cleanup.py` | prune build clones for closed issues / unregistered repos |
 | `systemd.py` | user service + timer install (continuous-mode by default) |

@@ -161,29 +161,103 @@ class TaskStore:
 
 
 class IssueCostStore:
-    """Persistent cumulative token + cost counter for a single issue."""
+    """Persistent cumulative token + cost counter for a single issue.
+
+    ``cost.json`` stores a ``{total, by_role}`` schema::
+
+        {
+          "total": {"prompt_tokens": …, …},
+          "by_role": {
+            "responder": {"prompt_tokens": …, …, "count": 1},
+            …
+          }
+        }
+
+    Legacy flat ``UsageData`` dicts (written by an older version) are
+    transparently upgraded on read.
+    """
 
     def __init__(self, issue_dir: Path) -> None:
         self.dir = issue_dir
         self.path = issue_dir / "cost.json"
 
-    def load(self) -> UsageData:
+    def _read_raw(self) -> dict:
+        """Return the parsed cost.json dict normalised to the new schema.
+
+        Returns:
+            A dict with ``total`` and ``by_role`` keys.  ``{}`` when the file
+            is missing, unreadable, non-JSON, or not a dict.  Legacy flat
+            ``UsageData`` dicts are wrapped into the new shape automatically.
+        """
         if not self.path.exists():
-            return UsageData()
+            return {}
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
-            return UsageData()
+            return {}
         if not isinstance(data, dict):
-            return UsageData()
-        return UsageData.from_dict(data)
+            return {}
+        # Legacy flat UsageData dict?  Wrap it.
+        if "total" not in data and ("prompt_tokens" in data or "cost_usd" in data):
+            return {"total": data, "by_role": {}}
+        return data
+
+    def load(self) -> UsageData:
+        """Return the cumulative ``UsageData`` (total across all roles)."""
+        raw = self._read_raw()
+        return UsageData.from_dict(raw.get("total", {}))
 
     def save(self, usage: UsageData) -> None:
+        """Persist a total UsageData (wipes any existing per-role data)."""
         self.dir.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps(usage.to_dict(), indent=2) + "\n", encoding="utf-8")
+        payload = {"total": usage.to_dict(), "by_role": {}}
+        self.path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
-    def add(self, usage: UsageData) -> UsageData:
-        """Add a turn's usage to the cumulative total, persist, return the new total."""
-        total = self.load() + usage
-        self.save(total)
+    def add(self, usage: UsageData, *, role: str | None = None) -> UsageData:
+        """Add a turn's usage to the cumulative total, persist, return new total.
+
+        When *role* is given, the usage is also recorded under ``by_role[role]``,
+        and that role's call count is incremented.  *role* is keyword-only.
+        """
+        raw = self._read_raw()
+        total_data = raw.get("total", {})
+        total = UsageData.from_dict(total_data) + usage
+
+        by_role = dict(raw.get("by_role", {}))
+        if role is not None:
+            role_data = by_role.get(role, {})
+            role_usage = UsageData.from_dict(role_data) + usage
+            role_entry = role_usage.to_dict()
+            role_entry["count"] = int(role_data.get("count", 0)) + 1
+            by_role[role] = role_entry
+
+        payload = {"total": total.to_dict(), "by_role": by_role}
+        self.dir.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
         return total
+
+    def load_by_role(self) -> dict[str, UsageData]:
+        """Return per-role cumulative ``UsageData``, keyed by role name.
+
+        The ``count`` field that may be present in the persisted data is
+        stripped — it is not a ``UsageData`` attribute.
+        """
+        raw = self._read_raw()
+        by_role = raw.get("by_role", {})
+        result: dict[str, UsageData] = {}
+        for role, entry in by_role.items():
+            if not isinstance(entry, dict):
+                continue
+            result[role] = UsageData.from_dict(entry)
+        return result
+
+    def load_role_counts(self) -> dict[str, int]:
+        """Return ``{role: call_count}`` for every role that has recorded data."""
+        raw = self._read_raw()
+        by_role = raw.get("by_role", {})
+        result: dict[str, int] = {}
+        for role, entry in by_role.items():
+            if isinstance(entry, dict):
+                count = entry.get("count", 0)
+                result[role] = int(count) if isinstance(count, (int, float)) else 0
+        return result

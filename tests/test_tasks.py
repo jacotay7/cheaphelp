@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from cheaphelp._internal import (
     opencode,
     planner,
@@ -129,10 +131,13 @@ def test_issue_cost_store_add_returns_cumulative_total(tmp_path: Path) -> None:
     assert total.completion_tokens == 20
     assert total.total_tokens == 30
     assert total.cost_usd == 0.001
-    # Verify the file was written with the right shape.
+    # Verify the file was written with the new schema shape.
     assert (tmp_path / "issue-2" / "cost.json").exists()
     data = json.loads((tmp_path / "issue-2" / "cost.json").read_text(encoding="utf-8"))
-    assert data == {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30, "cost_usd": 0.001}
+    assert data == {
+        "total": {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30, "cost_usd": 0.001},
+        "by_role": {},
+    }
 
 
 def test_issue_cost_store_accumulates_across_instances(tmp_path: Path) -> None:
@@ -187,3 +192,108 @@ def test_issue_cost_store_save_creates_parent_dir(tmp_path: Path) -> None:
     assert loaded.completion_tokens == 2
     assert loaded.total_tokens == 3
     assert loaded.cost_usd == 0.0001
+
+
+def test_issue_cost_store_migrates_legacy_flat_format(tmp_path: Path) -> None:
+    """A legacy flat UsageData dict (no 'total' key) is upgraded transparently."""
+    cost_dir = tmp_path / "issue-legacy"
+    cost_dir.mkdir(parents=True, exist_ok=True)
+    legacy = {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30, "cost_usd": 0.001}
+    (cost_dir / "cost.json").write_text(json.dumps(legacy) + "\n", encoding="utf-8")
+
+    store = IssueCostStore(cost_dir)
+    total = store.load()
+    assert total.prompt_tokens == 10
+    assert total.completion_tokens == 20
+    assert total.total_tokens == 30
+    assert total.cost_usd == 0.001
+
+    # Per-role data is empty for migrated files.
+    assert store.load_by_role() == {}
+    assert store.load_role_counts() == {}
+
+
+def test_issue_cost_store_add_with_role_accumulates_per_role(tmp_path: Path) -> None:
+    """add(usage, role=...) accumulates per-role data alongside the total."""
+    store = IssueCostStore(tmp_path / "issue-roles")
+
+    u1 = opencode.UsageData(prompt_tokens=10, completion_tokens=5, total_tokens=15, cost_usd=0.002)
+    u2 = opencode.UsageData(prompt_tokens=20, completion_tokens=10, total_tokens=30, cost_usd=0.004)
+    u3 = opencode.UsageData(prompt_tokens=5, completion_tokens=15, total_tokens=20, cost_usd=0.003)
+    u4 = opencode.UsageData(prompt_tokens=8, completion_tokens=12, total_tokens=20, cost_usd=0.002)
+
+    total1 = store.add(u1, role="responder")
+    assert total1.prompt_tokens == 10
+
+    total2 = store.add(u2, role="planner")
+    assert total2.prompt_tokens == 30
+
+    total3 = store.add(u3, role="worker")
+    assert total3.prompt_tokens == 35
+
+    total4 = store.add(u4, role="worker")
+    assert total4.prompt_tokens == 43
+
+    # Cumulative total = sum of all four.
+    total = store.load()
+    assert total.prompt_tokens == 43
+    assert total.completion_tokens == 42
+    assert total.total_tokens == 85
+    assert total.cost_usd == pytest.approx(0.011)
+
+    # Per-role breakdown.
+    by_role = store.load_by_role()
+    assert by_role["responder"].prompt_tokens == 10
+    assert by_role["responder"].completion_tokens == 5
+    assert by_role["planner"].prompt_tokens == 20
+    assert by_role["planner"].completion_tokens == 10
+    assert by_role["worker"].prompt_tokens == 13
+    assert by_role["worker"].completion_tokens == 27
+
+    # Role call counts.
+    counts = store.load_role_counts()
+    assert counts == {"responder": 1, "planner": 1, "worker": 2}
+
+
+def test_issue_cost_store_missing_by_role_is_not_loaded(tmp_path: Path) -> None:
+    """A file with 'total' but no 'by_role' loads cleanly."""
+    cost_dir = tmp_path / "issue-no-byrole"
+    cost_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "total": {"prompt_tokens": 5, "completion_tokens": 5, "total_tokens": 10, "cost_usd": 0.0005},
+    }
+    (cost_dir / "cost.json").write_text(json.dumps(payload) + "\n", encoding="utf-8")
+
+    store = IssueCostStore(cost_dir)
+    total = store.load()
+    assert total.prompt_tokens == 5
+    assert total.completion_tokens == 5
+    assert total.total_tokens == 10
+    assert total.cost_usd == 0.0005
+
+    assert store.load_by_role() == {}
+    assert store.load_role_counts() == {}
+
+
+def test_issue_cost_store_corrupt_or_missing_file_yields_empty_by_role(tmp_path: Path) -> None:
+    """Corrupt JSON or missing file: load_by_role and load_role_counts return {}."""
+    # Missing file.
+    store_missing = IssueCostStore(tmp_path / "issue-missing")
+    assert store_missing.load_by_role() == {}
+    assert store_missing.load_role_counts() == {}
+
+    # Corrupt JSON.
+    corrupt_dir = tmp_path / "issue-corrupt"
+    corrupt_dir.mkdir(parents=True, exist_ok=True)
+    (corrupt_dir / "cost.json").write_text("not json", encoding="utf-8")
+    store_corrupt = IssueCostStore(corrupt_dir)
+    assert store_corrupt.load_by_role() == {}
+    assert store_corrupt.load_role_counts() == {}
+
+    # Non-dict JSON.
+    nd_dir = tmp_path / "issue-nondict"
+    nd_dir.mkdir(parents=True, exist_ok=True)
+    (nd_dir / "cost.json").write_text("[]", encoding="utf-8")
+    store_nd = IssueCostStore(nd_dir)
+    assert store_nd.load_by_role() == {}
+    assert store_nd.load_role_counts() == {}

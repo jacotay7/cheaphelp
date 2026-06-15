@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from importlib import resources
 
-# Agent roles that ship with cheaphelp. Only "responder" is wired into the
-# orchestrator today; the rest are scaffolded for future milestones.
-AGENT_ROLES = ("responder", "planner", "worker", "reviewer", "rework")
+# Agent roles that ship with cheaphelp. The "fixer" runs only when the
+# deterministic quality gate fails after a build, repairing the working tree
+# before the issue is sent back to the planner.
+AGENT_ROLES = ("responder", "planner", "worker", "reviewer", "rework", "fixer")
 
 
 def load_prompt(role: str) -> str:

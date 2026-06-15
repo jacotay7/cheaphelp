@@ -26,6 +26,8 @@ pull request:
   executable tasks.
 . **Workers** implement one task at a time on an issue branch, verifying their
   work before committing.
+. **Fixer** makes one attempt to repair the working tree when the quality gate
+  fails, before the issue is sent back to the planner.
 . **Reviewer** reviews the combined diff and either opens a pull request for
   human approval or sends the work back for replanning.
 . **Rework** watches open PRs for new human review feedback and pushes fixup

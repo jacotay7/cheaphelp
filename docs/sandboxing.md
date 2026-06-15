@@ -10,10 +10,10 @@ Agents run inside a disposable clone, and cheaphelp generates an opencode
   the rest of your machine (including `~/.cheaphelp/.env`).
 - **`restrict_bash`** → a bash allow/deny policy. The read-only roles
   (responder, planner, reviewer) deny bash by default and allow only read-only
-  probes (`ls`, `cat`, `grep`, `git status/log/diff`, …). The worker allows bash
-  by default but denies dangerous/out-of-scope commands (`sudo`, `rm -rf /…`,
-  `dd`, `git push`, `ssh`, pipe-to-shell, …). cheaphelp does its own `git push`,
-  so agents never touch remotes.
+  probes (`ls`, `cat`, `grep`, `git status/log/diff`, …). The writer roles
+  (worker, rework, fixer) allow bash by default but deny dangerous/out-of-scope
+  commands (`sudo`, `rm -rf /…`, `dd`, `git push`, `ssh`, pipe-to-shell, …).
+  cheaphelp does its own `git push`, so agents never touch remotes.
 - **`no_network_tools`** → disables `webfetch`/`websearch` for all agents.
 
 > ⚠️ **These are guardrails, not a true sandbox.** Bash pattern-matching can be
