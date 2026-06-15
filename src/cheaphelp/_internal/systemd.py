@@ -7,6 +7,7 @@ user has a session unless lingering is enabled (`loginctl enable-linger`).
 
 from __future__ import annotations
 
+import getpass
 import os
 import re
 import subprocess
@@ -104,6 +105,15 @@ def _systemctl(*args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+def _loginctl(*args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["loginctl", *args],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
 def install(
     *,
     home: Path | None,
@@ -111,6 +121,7 @@ def install(
     continuous: bool = True,
     max_ticks: int = 20,
     sleep: float = 30.0,
+    linger: bool = False,
 ) -> list[str]:
     """Write unit files and enable/start the timer. Returns a log of actions."""
     units = render_units(home=home, interval=interval, continuous=continuous, max_ticks=max_ticks, sleep=sleep)
@@ -129,6 +140,18 @@ def install(
         actions.append(f"enable failed: {enable.stderr.strip()}")
     else:
         actions.append(f"enabled and started {TIMER_NAME}")
+
+    if linger:
+        user = os.environ.get("USER") or getpass.getuser()
+        try:
+            loginctl = _loginctl("enable-linger", user)
+            if loginctl.returncode != 0:
+                actions.append(f"enable lingering failed: {loginctl.stderr.strip()} (units still written)")
+            else:
+                actions.append(f"enabled lingering for {user}")
+        except FileNotFoundError:
+            actions.append("enable lingering failed: loginctl not found on PATH (units still written)")
+
     return actions
 
 
