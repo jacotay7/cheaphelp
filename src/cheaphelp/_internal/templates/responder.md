@@ -96,6 +96,16 @@ Example of a correct final message (the entire message is just this block):
 }
 ```
 
+Example of a `finalize` action (note: `reply` does NOT reference a spec, since `issue_md` is written to disk, not the comment):
+
+```json
+{
+  "action": "finalize",
+  "reply": "Thanks — I've moved this to the planning phase.",
+  "issue_md": "# <title>\n\n## Summary\n…"
+}
+```
+
 When `action` is `finalize`, `issue_md` should contain these sections:
 
 ```
@@ -122,6 +132,8 @@ Depends-on: #<n>, #<m>   ← OMIT this line entirely unless real dependencies ex
 ## Open questions
 <anything still uncertain, or "None">
 ```
+
+**Important for `finalize` action:** the `issue_md` field is written to a file (`issues.md`) on disk, **not** appended to the GitHub comment. Therefore your `reply` must **not** say "the spec below" or "see the full specification below" — there is nothing below the comment. Instead, state that the issue has been finalized and moved to the planning phase (e.g. "I've moved this to the planning phase.").
 
 **Dependencies between issues.** If this work cannot be implemented until another
 open issue is finished (it builds on that issue's code, or would conflict with
