@@ -298,3 +298,41 @@ def test_run_build_aborts_before_reviewer_when_budget_exhausted(
     assert len(budget_actions) >= 1
 
     assert report.budget_exhausted is True
+
+
+def test_run_task_unparseable_summary_references_log(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When run_agent returns a clean exit with no decision, the summary mentions the log file."""
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    from cheaphelp._internal import planner  # noqa: PLC0415
+    from cheaphelp._internal.tasks import BLOCKED, TaskStore  # noqa: PLC0415
+
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    repo = RepoEntry(owner="o", name="r")
+    issue_dir = ws.issue_dir(repo.owner, repo.name, 1)
+    issue_dir.mkdir(parents=True, exist_ok=True)
+    (issue_dir / "issues.md").write_text("# Test\n\nDo it.\n", encoding="utf-8")
+    store = TaskStore(issue_dir)
+    _, tasks = planner.parse_manifest({"tasks": [{"id": "t1", "title": "x"}]})
+    store.materialize(tasks)
+
+    # Stub opencode.run_agent to return an unparseable result.
+    monkeypatch.setattr(
+        opencode,
+        "run_agent",
+        lambda *a, **kw: SimpleNamespace(returncode=0, stdout="no json here", stderr="", decision=None, usage=None),
+    )
+    # Stub git operations that are not reached in the unparseable path but
+    # keep the test clean.
+    monkeypatch.setattr(gitutil, "commit_all", lambda *a, **kw: True)
+    monkeypatch.setattr(gitutil, "push_branch", lambda *a, **kw: None)
+
+    result = worker.run_task(ws, Config(), repo, 1, store.load()[0], tmp_path, token=None)
+
+    assert result.status == BLOCKED
+    assert result.error == "unparseable"
+    assert store.load()[0].summary == "Worker produced no parseable result (see `last_unparsed_worker.log`)."

@@ -462,6 +462,60 @@ def test_rework_honors_gh_no_push_alias(
     assert loaded["last_push_sha"] == "newsha"
 
 
+def test_rework_unparseable_escalation_comment_references_log(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When rework agent returns clean-exit unparseable output, the escalation comment mentions the log."""
+    import datetime  # noqa: PLC0415
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    repo = RepoEntry(owner="octocat", name="hello")
+    issue_dir = ws.issue_dir(repo.owner, repo.name, 1)
+    issue_dir.mkdir(parents=True, exist_ok=True)
+    (issue_dir / "issues.md").write_text("# Test\n\nDo it.\n", encoding="utf-8")
+    _make_pr_state(issue_dir, last_push_sha="sha1", rework_attempts=0)
+
+    gh = _ReworkFakeGH()
+    now = datetime.datetime.now(datetime.timezone.utc)
+    new_ts = now.isoformat()
+    gh.reviews = [
+        {
+            "id": 1,
+            "state": "CHANGES_REQUESTED",
+            "user": {"login": "alice"},
+            "submitted_at": new_ts,
+            "body": "Fix it.",
+        },
+    ]
+
+    old_ts = (now - datetime.timedelta(hours=2)).isoformat()
+    monkeypatch.setattr(gitutil, "_run", lambda *a, **k: old_ts)
+    monkeypatch.setattr(gitutil, "ensure_work_clone", lambda *_a, **_k: tmp_path)
+    monkeypatch.setattr(gitutil, "diff_against_base", lambda *_a, **_k: ("", ""))
+    monkeypatch.setattr(
+        opencode,
+        "run_agent",
+        lambda *_a, **_k: SimpleNamespace(returncode=0, stdout="no json here", stderr="", decision=None),
+    )
+
+    config = Config.from_dict({"max_task_attempts": 1})
+    result = run_rework(gh, ws, config, repo, 1, token=None)  # ty: ignore[invalid-argument-type]
+
+    assert result.status == "escalated"
+    assert result.error == "unparseable"
+    # A comment was posted referencing the log file.
+    assert len(gh.created_comments) >= 1
+    last_comment = gh.created_comments[-1][1]
+    assert "Escalating" in last_comment
+    assert "last_unparsed_rework.log" in last_comment
+    # Labels were updated.
+    assert any(config.labels["needs_human"] in labels for labels in gh.added_labels)
+    assert config.labels["in_review"] in gh.removed_labels
+
+
 # --- rework stage integration (orchestrator dispatch) -----------------------
 
 

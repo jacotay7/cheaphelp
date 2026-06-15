@@ -264,6 +264,66 @@ def test_run_agent_backoff_is_exponential(
     assert 1.5 <= sleeps[1] <= 2.5
 
 
+# --- _save_unparsed_output -------------------------------------------------
+def test_save_unparsed_output_writes_log_file(tmp_path: Path) -> None:
+    """When the result has a clean exit and no decision, the log file is written."""
+    issue_dir = tmp_path / "issue-1"
+    result = opencode.AgentResult(returncode=0, stdout="hello\n", stderr="oops\n", decision=None)
+    opencode._save_unparsed_output(issue_dir, "worker", result)
+
+    log_path = issue_dir / "last_unparsed_worker.log"
+    assert log_path.exists()
+    content = log_path.read_text(encoding="utf-8")
+    assert "--- stdout ---" in content
+    assert "hello" in content
+    assert "--- stderr ---" in content
+    assert "oops" in content
+
+
+def test_save_unparsed_output_truncates_combined_to_64kb(tmp_path: Path) -> None:
+    """Output exceeding 64 KB is truncated to the last 65536 bytes."""
+    issue_dir = tmp_path / "issue-1"
+    result = opencode.AgentResult(returncode=0, stdout="x" * 200_000, stderr="", decision=None)
+    opencode._save_unparsed_output(issue_dir, "worker", result)
+
+    log_path = issue_dir / "last_unparsed_worker.log"
+    assert log_path.exists()
+    size = log_path.stat().st_size
+    assert size <= 70_000
+    content = log_path.read_text(encoding="utf-8")
+    assert "truncated to last" in content
+
+
+def test_save_unparsed_output_noop_when_issue_dir_none(tmp_path: Path) -> None:
+    """When issue_dir is None, no file is written."""
+    result = opencode.AgentResult(returncode=0, stdout="hello\n", stderr="oops\n", decision=None)
+    opencode._save_unparsed_output(None, "worker", result)
+
+    # No file should exist anywhere under tmp_path.
+    files = list(tmp_path.rglob("*"))
+    assert not any(f.name.startswith("last_unparsed_") for f in files)
+
+
+def test_save_unparsed_output_noop_when_decision_present(tmp_path: Path) -> None:
+    """When decision is not None, no file is written."""
+    issue_dir = tmp_path / "issue-1"
+    result = opencode.AgentResult(returncode=0, stdout="hello\n", stderr="", decision={})
+    opencode._save_unparsed_output(issue_dir, "worker", result)
+
+    log_path = issue_dir / "last_unparsed_worker.log"
+    assert not log_path.exists()
+
+
+def test_save_unparsed_output_noop_when_nonzero_exit(tmp_path: Path) -> None:
+    """When returncode != 0, no file is written even if decision is None."""
+    issue_dir = tmp_path / "issue-1"
+    result = opencode.AgentResult(returncode=1, stdout="boom", stderr="", decision=None)
+    opencode._save_unparsed_output(issue_dir, "worker", result)
+
+    log_path = issue_dir / "last_unparsed_worker.log"
+    assert not log_path.exists()
+
+
 # --- UsageData --------------------------------------------------------------
 def test_usage_data_defaults() -> None:
     u = opencode.UsageData()
@@ -418,6 +478,55 @@ def test_run_agent_populates_usage(
     assert result.usage.prompt_tokens == 50
     assert result.usage.completion_tokens == 30
     assert result.usage.cost_usd == 0.004
+
+
+# --- run_agent unparseable log via mock ------------------------------------
+@pytest.mark.parametrize("role", ["worker", "planner", "responder", "reviewer", "rework"])
+def test_run_agent_writes_unparsed_log_via_mock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    role: str,
+) -> None:
+    """When CHEAPHELP_AGENT_MOCK points to unparseable prose, a log file is written."""
+    mock_file = tmp_path / "mock.txt"
+    mock_content = "This is just prose with no json block whatsoever."
+    mock_file.write_text(mock_content, encoding="utf-8")
+    monkeypatch.setenv("CHEAPHELP_AGENT_MOCK", str(mock_file))
+
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    issue_dir = ws.issue_dir("o", "r", 1)
+
+    result = opencode.run_agent(ws, Config(), role, "do it", cwd=tmp_path, issue_dir=issue_dir)
+
+    assert result.decision is None
+    log_path = issue_dir / f"last_unparsed_{role}.log"
+    assert log_path.exists()
+    assert mock_content in log_path.read_text(encoding="utf-8")
+
+
+def test_run_agent_truncates_unparsed_log_via_mock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When mock output is very large, the on-disk log is truncated to ~64 KB."""
+    mock_file = tmp_path / "mock_large.txt"
+    large_content = "x" * 200_000
+    mock_file.write_text(large_content, encoding="utf-8")
+    monkeypatch.setenv("CHEAPHELP_AGENT_MOCK", str(mock_file))
+
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    issue_dir = ws.issue_dir("o", "r", 1)
+
+    result = opencode.run_agent(ws, Config(), "worker", "do it", cwd=tmp_path, issue_dir=issue_dir)
+
+    assert result.decision is None
+    log_path = issue_dir / "last_unparsed_worker.log"
+    assert log_path.exists()
+    assert log_path.stat().st_size <= 70_000
+    content = log_path.read_text(encoding="utf-8")
+    assert "truncated to last" in content
 
 
 # --- opencode config shape --------------------------------------------------
