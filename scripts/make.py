@@ -42,7 +42,10 @@ def uv_install(venv: Path) -> None:
     """Install dependencies using uv."""
     with environ(UV_PROJECT_ENVIRONMENT=str(venv), PYO3_USE_ABI3_FORWARD_COMPATIBILITY="1"):
         if "CI" in os.environ:
-            shell("uv sync --no-editable")
+            # On persistent self-hosted runners, uv's cache can serve a stale
+            # build of the local `cheaphelp` package left over from a previous
+            # commit. Force it to be rebuilt from the current checkout every run.
+            shell("uv sync --no-editable --reinstall-package cheaphelp")
         else:
             shell("uv sync")
 
