@@ -403,7 +403,13 @@ def cmd_systemd_install(args: argparse.Namespace) -> int:
     if (rc := _require_workspace(ws)) is not None:
         return rc
     try:
-        actions = systemd.install(home=ws.home, interval=args.interval)
+        actions = systemd.install(
+            home=ws.home,
+            interval=args.interval,
+            continuous=args.continuous,
+            max_ticks=args.max_ticks,
+            sleep=args.sleep,
+        )
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 2
