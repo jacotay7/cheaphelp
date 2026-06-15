@@ -75,6 +75,16 @@ def _patch_loginctl_success(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(systemd, "_loginctl", fake)
 
 
+def _patch_unit_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Redirect ``systemd.user_unit_dir`` into ``tmp_path``.
+
+    ``install()`` writes unit files before any of the (mocked) systemctl/
+    loginctl calls, so without this every install test would write real
+    files into the developer's actual ``~/.config/systemd/user/``.
+    """
+    monkeypatch.setattr(systemd, "user_unit_dir", lambda: tmp_path / "systemd-user")
+
+
 def test_install_linger_calls_loginctl_with_user(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -82,6 +92,7 @@ def test_install_linger_calls_loginctl_with_user(
     """``install(linger=True)`` calls ``loginctl enable-linger <user>``."""
     _patch_systemctl_success(monkeypatch)
     _patch_loginctl_success(monkeypatch)
+    _patch_unit_dir(monkeypatch, tmp_path)
     monkeypatch.setenv("USER", "tester")
 
     actions = systemd.install(home=tmp_path, interval="10m", linger=True)
@@ -94,6 +105,7 @@ def test_install_linger_default_off(
 ) -> None:
     """``install(linger=False)`` does not call ``loginctl``."""
     _patch_systemctl_success(monkeypatch)
+    _patch_unit_dir(monkeypatch, tmp_path)
 
     loginctl_calls: list[tuple[str, ...]] = []
 
@@ -114,6 +126,7 @@ def test_install_linger_handles_loginctl_failure(
     tmp_path: Path,
 ) -> None:
     """``loginctl`` returning non-zero logs a warning and continues."""
+    _patch_unit_dir(monkeypatch, tmp_path)
     systemctl_calls: list[tuple[str, ...]] = []
 
     def record_systemctl(*args: str) -> SimpleNamespace:
@@ -144,6 +157,7 @@ def test_install_linger_handles_missing_loginctl(
 ) -> None:
     """Missing ``loginctl`` binary logs a warning and continues."""
     _patch_systemctl_success(monkeypatch)
+    _patch_unit_dir(monkeypatch, tmp_path)
 
     def missing_loginctl(*_a: str) -> SimpleNamespace:
         msg = "loginctl not found"
@@ -169,6 +183,7 @@ def test_cli_systemd_install_linger_flag_prints_action_and_suppresses_tip(
 
     _patch_systemctl_success(monkeypatch)
     _patch_loginctl_success(monkeypatch)
+    _patch_unit_dir(monkeypatch, tmp_path)
     monkeypatch.setenv("USER", "tester")
 
     ws = _setup_workspace(tmp_path)
@@ -190,6 +205,7 @@ def test_cli_systemd_install_without_linger_prints_tip(
 
     _patch_systemctl_success(monkeypatch)
     _patch_loginctl_success(monkeypatch)
+    _patch_unit_dir(monkeypatch, tmp_path)
     monkeypatch.setenv("USER", "tester")
 
     ws = _setup_workspace(tmp_path)
