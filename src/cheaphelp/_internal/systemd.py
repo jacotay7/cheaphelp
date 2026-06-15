@@ -47,12 +47,28 @@ class UnitFiles:
     timer: str
 
 
-def _exec_start() -> str:
-    """Command the service runs. Uses the current interpreter's `-m cheaphelp`."""
-    return f"{sys.executable} -m cheaphelp run"
+def _exec_start(*, continuous: bool, max_ticks: int, sleep: float) -> str:
+    """Command the service runs. Uses the current interpreter's `-m cheaphelp`.
+
+    In continuous mode, each timer firing drains the backlog (repeated ticks
+    until one produces no agent turns, capped at *max_ticks*) instead of doing
+    a single tick, so queued work doesn't have to wait for the next firing.
+    """
+    cmd = f"{sys.executable} -m cheaphelp run"
+    if continuous:
+        cmd += f" --continuous --max-ticks {max_ticks} --sleep {sleep:g}"
+    return cmd
 
 
-def render_units(*, home: Path | None, interval: str, description: str = "cheaphelp") -> UnitFiles:
+def render_units(
+    *,
+    home: Path | None,
+    interval: str,
+    description: str = "cheaphelp",
+    continuous: bool = True,
+    max_ticks: int = 20,
+    sleep: float = 30.0,
+) -> UnitFiles:
     """Render the .service and .timer unit file contents."""
     on_active = normalize_interval(interval)
     env_line = f"Environment=CHEAPHELP_HOME={home}\n" if home else ""
@@ -63,7 +79,7 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-{env_line}ExecStart={_exec_start()}
+{env_line}ExecStart={_exec_start(continuous=continuous, max_ticks=max_ticks, sleep=sleep)}
 """
     timer = f"""[Unit]
 Description={description} timer
@@ -88,9 +104,16 @@ def _systemctl(*args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def install(*, home: Path | None, interval: str) -> list[str]:
+def install(
+    *,
+    home: Path | None,
+    interval: str,
+    continuous: bool = True,
+    max_ticks: int = 20,
+    sleep: float = 30.0,
+) -> list[str]:
     """Write unit files and enable/start the timer. Returns a log of actions."""
-    units = render_units(home=home, interval=interval)
+    units = render_units(home=home, interval=interval, continuous=continuous, max_ticks=max_ticks, sleep=sleep)
     unit_dir = user_unit_dir()
     unit_dir.mkdir(parents=True, exist_ok=True)
     (unit_dir / SERVICE_NAME).write_text(units.service, encoding="utf-8")

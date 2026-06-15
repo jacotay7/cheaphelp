@@ -16,8 +16,14 @@ dispatches by label:
 (no pipeline label) + human spoke last  -> responder  refine scope -> issues.md, label :ready
 :ready / :needs-replan                  -> planner    issues.md -> tasks,      label :planned
 :planned, tasks pending                 -> worker     implement one task on the issue branch
-:planned, all tasks done                -> quality gate -> reviewer  open PR or replan
+:planned, all tasks done                -> quality gate -> reviewer  open PR (label :in-review) or replan
+:in-review                              -> rework     address new PR review feedback, or no-op
+:needs-human, human replied             -> responder  re-engage a stuck issue
+:needs-human, no new reply / :rejected  -> (idle)
 ```
+
+A daily USD spend cap (`daily_budget_usd`, `spend.py`) can halt new agent turns
+for the rest of the UTC day; see `orchestrator.tick` budget handling.
 
 ## Workflow (IMPORTANT: branch protection)
 
@@ -63,13 +69,17 @@ All product code is under `src/cheaphelp/_internal/`:
 | `github.py` | minimal GitHub REST client (httpx) |
 | `registry.py` | registered-repo store (`repos.json`) |
 | `gitutil.py` | clones, commit, push, diff helpers |
+| `lock.py` | per-repo file locks so concurrent ticks don't collide |
+| `spend.py` | daily USD spend tracker for the budget guardrail |
+| `conventions.py` | reads `CHEAPHELP.md`/`AGENTS.md`/`CONTRIBUTING.md` into agent context |
+| `pr_state.py` | persists PR <-> issue link state for the rework stage |
 | `opencode.py` | generate `opencode.json`, run agents headlessly, parse decisions |
-| `templates/*.md` | bundled agent prompts (responder/planner/worker/reviewer) |
+| `templates/*.md` | bundled agent prompts (responder/planner/worker/reviewer/rework) |
 | `tasks.py` | task manifest + per-issue task-state store |
-| `responder.py` / `planner.py` / `worker.py` / `reviewer.py` | per-role turn logic |
+| `responder.py` / `planner.py` / `worker.py` / `reviewer.py` / `rework.py` | per-role turn logic |
 | `orchestrator.py` | one tick of the state machine (`tick()`, `classify()`, stage dispatch) |
 | `cleanup.py` | prune build clones for closed issues / unregistered repos (keeps state) |
-| `systemd.py` | user service + timer install |
+| `systemd.py` | user service + timer install (continuous-mode by default) |
 | `commands.py` / `cli.py` | argparse CLI (`cmd_*` per subcommand) |
 
 Tests live in `tests/`, one file per `src/cheaphelp/_internal/` module (plus
@@ -85,9 +95,9 @@ Tests live in `tests/`, one file per `src/cheaphelp/_internal/` module (plus
 - **Workspace is the source of truth at runtime**, default `~/.cheaphelp`
   (override `CHEAPHELP_HOME`): `config.json`, `.env`, `repos.json`, `agents/`
   (editable prompt overrides), `opencode/opencode.json` (generated),
-  `state/<owner>__<repo>/issue-<n>/` (issues.md, plan.md, tasks.json, tasks/),
-  `clones/`, `logs/`. After editing models/prompts/sandbox, regenerate with
-  `cheaphelp agents sync`.
+  `state/<owner>__<repo>/issue-<n>/` (issues.md, plan.md, tasks.json, tasks/,
+  cost.json, pr_state.json), `state/daily_spend.json`, `clones/`, `logs/`.
+  After editing models/prompts/sandbox, regenerate with `cheaphelp agents sync`.
 - **`tasks.json` is authoritative; the `.md` files are readable mirrors.** Use
   `TaskStore` for all task state transitions.
 - **cheaphelp owns git remotes**: workers/reviewer never push; the orchestrator

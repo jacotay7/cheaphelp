@@ -219,7 +219,32 @@ def get_parser() -> argparse.ArgumentParser:
     p_sys_install.add_argument(
         "--interval",
         default="10m",
-        help="Tick interval, e.g. 30s, 10m, 2h (default: 10m).",
+        help="Timer firing interval, e.g. 30s, 10m, 2h (default: 10m).",
+    )
+    p_sys_install.add_argument(
+        "--continuous",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Each timer firing runs `cheaphelp run --continuous`, draining the "
+            "backlog (repeated ticks until one is idle, capped at --max-ticks) "
+            "instead of a single tick (default: enabled). Use --no-continuous "
+            "for one tick per firing."
+        ),
+    )
+    p_sys_install.add_argument(
+        "--max-ticks",
+        type=int,
+        default=20,
+        metavar="N",
+        help="Cap on ticks per timer firing in continuous mode (default 20).",
+    )
+    p_sys_install.add_argument(
+        "--sleep",
+        type=float,
+        default=30.0,
+        metavar="N",
+        help="Seconds to sleep between ticks in continuous mode (default 30).",
     )
     p_sys_install.set_defaults(func=commands.cmd_systemd_install)
     sys_sub.add_parser("uninstall", help="Stop and remove the timer.").set_defaults(
