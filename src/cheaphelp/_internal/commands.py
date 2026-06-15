@@ -30,6 +30,7 @@ from cheaphelp._internal.github import GitHubClient, GitHubError
 from cheaphelp._internal.opencode import UsageData
 from cheaphelp._internal.orchestrator import classify, tick
 from cheaphelp._internal.registry import Registry, RepoEntry, parse_slug
+from cheaphelp._internal.spend import DailySpendTracker
 from cheaphelp._internal.tasks import IssueCostStore, TaskStore
 
 _LOG_TAIL_LINES = 50
@@ -119,6 +120,25 @@ def _format_budget_line(cap: float, spend: float, exhausted: bool) -> list[str]:
             f"Budget: EXHAUSTED — spent ${spend:.3f} of ${cap:.3f} daily cap. Resumes tomorrow (UTC).",
         ]
     return [f"Budget: ${spend:.3f} / ${cap:.3f} daily cap"]
+
+
+def _print_status_budget_summary(ws: Workspace, config: Config) -> None:
+    """Print the daily-budget footer line for ``cheaphelp status`` if a cap is set.
+
+    Reads today's spend from ``ws.state_dir / "daily_spend.json"`` via
+    :class:`DailySpendTracker` and prints a one-line summary in the same format
+    as the tick footer. No-op when ``config.daily_budget_usd <= 0`` (unlimited).
+    Exhaustion is derived from ``spend >= cap`` since the tracker does not
+    persist an exhausted flag — consistent with the read-only snapshot semantics
+    of the ``status`` command (the tick path records exhaustion in fly).
+    """
+    cap = float(config.daily_budget_usd)
+    if cap <= 0.0:
+        return
+    spend = DailySpendTracker(ws.state_dir).daily_spend()
+    exhausted = spend >= cap
+    for line in _format_budget_line(cap=cap, spend=spend, exhausted=exhausted):
+        print(line)
 
 
 # --- init ------------------------------------------------------------------
@@ -547,6 +567,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     repos = [r for r in Registry(ws.registry_path).load() if r.enabled]
     if not repos:
         print("No enabled repositories registered. Add one with `cheaphelp repo add owner/name`.")
+        _print_status_budget_summary(ws, config)
         return 0
 
     title_width = 60
@@ -580,6 +601,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     except GitHubError as exc:
         print(f"GitHub API error: {exc}", file=sys.stderr)
         return 1
+    _print_status_budget_summary(ws, config)
     return 0
 
 
