@@ -378,6 +378,60 @@ _REPROMPT_SUFFIX = (
     "and nothing else — no prose before or after it. Reply with only that block now."
 )
 
+# Maximum bytes to keep from unparseable agent output (last N bytes).
+_UNPARSED_LOG_BYTES = 65_536
+
+
+def _save_unparsed_output(
+    issue_dir: Path | None,
+    role: str,
+    result: AgentResult,
+) -> None:
+    """Persist raw agent output when parsing failed on a clean exit.
+
+    Writes ``last_unparsed_<role>.log`` to *issue_dir* when the agent exited
+    cleanly (returncode 0) but produced no parseable decision block.  This is a
+    best-effort diagnostic helper — I/O errors are logged and swallowed.
+
+    Parameters:
+        issue_dir: the issue state directory (``None`` to skip).
+        role: the agent role name (e.g. ``"worker"``).
+        result: the agent result to inspect and persist.
+    """
+    if issue_dir is None:
+        return
+    if result.returncode != 0:
+        return
+    if result.decision is not None:
+        return
+
+    try:
+        parts: list[str] = []
+        if result.stdout:
+            parts.append("--- stdout ---")
+            parts.append(result.stdout)
+        if result.stderr:
+            parts.append("--- stderr ---")
+            parts.append(result.stderr)
+
+        body = "\n".join(parts) if parts else "(no output captured)\n"
+
+        encoded = body.encode("utf-8")
+        if len(encoded) > _UNPARSED_LOG_BYTES:
+            encoded = encoded[-_UNPARSED_LOG_BYTES:]
+            body = encoded.decode("utf-8", errors="replace")
+            body = f"... (truncated to last {_UNPARSED_LOG_BYTES} bytes) ...\n{body}"
+
+        issue_dir.mkdir(parents=True, exist_ok=True)
+        (issue_dir / f"last_unparsed_{role}.log").write_text(body, encoding="utf-8")
+    except Exception as exc:  # noqa: BLE001
+        _LOG.warning(
+            "failed to save unparsed output for %s in %s: %s",
+            role,
+            issue_dir,
+            exc,
+        )
+
 
 def run_agent(
     workspace: Workspace,
@@ -387,6 +441,7 @@ def run_agent(
     *,
     cwd: Path,
     timeout: float = 600.0,
+    issue_dir: Path | None = None,
 ) -> AgentResult:
     """Run an opencode agent headlessly and return its result.
 
@@ -397,11 +452,15 @@ def run_agent(
         prompt: the user message handed to the agent.
         cwd: working directory for opencode (usually a repo clone).
         timeout: seconds before the subprocess is killed.
+        issue_dir: issue state directory; when set, unparseable clean-exit
+            output is saved to ``last_unparsed_<role>.log`` in this directory
+            for offline diagnosis.
 
     If `CHEAPHELP_AGENT_MOCK` is set, no subprocess runs; the mock is returned.
     """
     mock = _mock_result()
     if mock is not None:
+        _save_unparsed_output(issue_dir, role, mock)
         return mock
 
     binary = find_opencode(config)
@@ -471,6 +530,7 @@ def run_agent(
 
         if result.returncode != 0:
             if attempt >= max_attempts:
+                _save_unparsed_output(issue_dir, role, result)
                 return result
             delay = _compute_backoff(attempt, config.retry_base_delay)
             _LOG.warning(
@@ -489,6 +549,8 @@ def run_agent(
             return result
         # Clean exit, no parseable decision: the existing single re-prompt
         # for a format issue (NOT a transient retry).
-        return _invoke(f"{prompt}\n\n{_REPROMPT_SUFFIX}")
+        reprompt_result = _invoke(f"{prompt}\n\n{_REPROMPT_SUFFIX}")
+        _save_unparsed_output(issue_dir, role, reprompt_result)
+        return reprompt_result
 
     raise RuntimeError("retry loop exited without return")  # pragma: no cover
