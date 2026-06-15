@@ -9,9 +9,9 @@ team of narrow AI agents — powered by **cheap [OpenRouter](https://openrouter.
 models** through the **[opencode](https://opencode.ai)** terminal harness — to
 triage issues, plan work, implement it, and open pull requests for human review.
 
-> **Status: full pipeline wired and exercised live.** All five roles run
-> end-to-end against a real repository; expect to keep tuning prompts and
-> hardening edge cases.
+> **Status: full pipeline wired and exercised live.** All roles run end-to-end
+> against a real repository; expect to keep tuning prompts and hardening edge
+> cases.
 
 ## The pipeline
 
@@ -20,6 +20,7 @@ triage issues, plan work, implement it, and open pull requests for human review.
 | **Responder** | Talks to issue authors in the comment thread, refines scope, protects the repo's interests, and finalizes a clean `issues.md` (or rejects). Also re-engages issues that were stuck on `needs-human` once a person replies. | ✅ |
 | **Planner** | Turns `issues.md` into an ordered manifest of small tasks (`task.md` files). | ✅ |
 | **Workers** | Execute one task at a time on the issue branch, verify, commit, and write summaries. | ✅ |
+| **Fixer** | When the quality gate fails, makes one attempt to repair the working tree from the gate output (failing tests, lint, types) so it never escalates to a full re-plan. | ✅ |
 | **Reviewer** | Reviews the combined diff; either opens a PR for human approval or sends it back to the planner. | ✅ |
 | **Rework** | Watches open PRs (`cheaphelp:in-review`) for new human review feedback and pushes fixup commits to address it, or no-ops until there's something new. | ✅ |
 
@@ -32,6 +33,7 @@ the right agent:
 :ready / :needs-replan                  -> planner     issues.md -> tasks,        label :planned
 :planned, tasks pending                  -> worker      implement one task on the issue branch
 :planned, all tasks done                 -> quality gate -> reviewer  open PR (label :in-review) or replan
+                                            (gate fails -> fixer repairs + re-runs gate before replanning)
 :in-review                               -> rework      address new PR review feedback, or no-op
 :needs-human, human replied              -> responder   re-engage a stuck issue
 :needs-human, no new reply               -> (idle)      waiting on a person
@@ -52,9 +54,13 @@ commands inside the work clone:
    automatically. This resolves trivial issues (formatting, import order,
    `--fix`-able lint) cheaply, so they never escalate to a re-plan.
 2. **`checks`** (set with `--checks`) is the gate — e.g. `ruff check . && pytest`.
-   A **failing gate never becomes a PR**: the remaining failures are written to
-   the issue's `replan.md`, the issue is relabeled `needs-replan`, and the
-   planner produces a minimal corrective plan.
+   A **failing gate never becomes a PR**. On failure the **fixer** role gets one
+   (configurable) attempt to repair the working tree from the gate output, after
+   which the gate is re-run. Only if it *still* fails are the remaining failures
+   written to the issue's `replan.md`, the issue relabeled `needs-replan`, and the
+   planner asked for a minimal corrective plan. Set
+   `quality_gate_fix_attempts` to `0` in `config.json` to skip the fixer and fail
+   straight to a re-plan.
 
 Set them when registering: `cheaphelp repo add <slug> --autofix "…" --checks "…"`.
 Leave either empty to disable that step. Together they are the deterministic
@@ -78,37 +84,58 @@ pipeline behaves.
   — the `workflow` scope is required so cheaphelp can push branches that touch
   `.github/workflows/`; without it those pushes are rejected and the PR never opens
 
+## Install
+
+The recommended way to install the `cheaphelp` CLI on your machine:
+
+```bash
+pipx install cheaphelp
+# or, if you don't use pipx:
+pip install --user cheaphelp
+```
+
+For development (running from a clone, contributing, or testing unreleased
+changes), use `uv sync` inside the clone and invoke the CLI as
+`uv run cheaphelp …` — see [Quick start](#quick-start) step 1.
+
 ## Quick start
 
 ```bash
-# 1. Install (from a clone, for now)
-uv sync
+# 1. (Development install — end users should `pipx install cheaphelp`, see
+#    the Install section above.) Clone, sync deps, and install the
+#    `cheaphelp` command globally.
+git clone https://github.com/jacotay7/cheaphelp.git
+cd cheaphelp
+uv sync                                          # install deps (needed before tool install)
+uv tool install --from . cheaphelp              # puts `cheaphelp` on $PATH
 
 # 2. Create your machine-local workspace (~/.cheaphelp) and store secrets.
 #    Prompts for your tokens, or pass them as flags / set them later.
-uv run cheaphelp init
+cheaphelp init
 
 # 3. Check everything is wired up.
-uv run cheaphelp doctor
+cheaphelp doctor
 
 # 4. Register a repo to work on.
-uv run cheaphelp repo add owner/name
-uv run cheaphelp repo list
+cheaphelp repo add owner/name
+cheaphelp repo list
 
 # 5. Dry-run one tick (shows what it *would* do, no changes).
-uv run cheaphelp run --dry-run
+cheaphelp run --dry-run
 
 # 6. Run it for real (responder engages open issues).
-uv run cheaphelp run
+cheaphelp run
 
 # 7. Or drain the whole backlog now: repeat ticks until one is idle.
-uv run cheaphelp run --continuous
+cheaphelp run --continuous
 
 # 8. Install the background timer (default every 10 minutes; each firing
 #    runs `cheaphelp run --continuous` by default, see "Background service").
-uv run cheaphelp systemd install --interval 10m
-uv run cheaphelp systemd status
+cheaphelp systemd install --interval 10m
+cheaphelp systemd status
 ```
+
+> **Upgrading.** After pulling new code, re-run `uv tool install --from . --reinstall cheaphelp` to refresh the global command. A plain `git pull` updates the source tree but does NOT refresh the installed binary, and `uv run cheaphelp` would then diverge from your checkout.
 
 ### Running modes
 
@@ -194,9 +221,10 @@ or edit it without hand-editing JSON.
     "planner":   "openrouter/minimax/minimax-m3",
     "worker":    "openrouter/deepseek/deepseek-v4-flash",
     "reviewer":  "openrouter/minimax/minimax-m3",
-    "rework":    "openrouter/deepseek/deepseek-v4-flash"
+    "rework":    "openrouter/deepseek/deepseek-v4-flash",
+    "fixer":     "openrouter/deepseek/deepseek-v4-flash"
   },
-  "variants": { "responder": "max", "planner": "", "worker": "max", "reviewer": "", "rework": "max" },
+  "variants": { "responder": "max", "planner": "", "worker": "max", "reviewer": "", "rework": "max", "fixer": "max" },
   "sandbox": {
     "confine_to_workdir": true,
     "restrict_bash": true,
@@ -207,6 +235,7 @@ or edit it without hand-editing JSON.
   "agent_timeout": 600,
   "daily_budget_usd": 0,
   "budget_warn_at": 0.80,
+  "quality_gate_fix_attempts": 1,
   "opencode_bin": "opencode"
 }
 ```
@@ -235,8 +264,9 @@ Agents run inside a disposable clone, and cheaphelp generates an opencode
   the rest of your machine (including `~/.cheaphelp/.env`).
 - **`restrict_bash`** → a bash allow/deny policy. The read-only roles
   (responder, planner, reviewer) deny bash by default and allow only read-only
-  probes (`ls`, `cat`, `grep`, `git status/log/diff`, …). The worker allows bash
-  by default but denies dangerous/out-of-scope commands (`sudo`, `rm -rf /…`,
+  probes (`ls`, `cat`, `grep`, `git status/log/diff`, …). The writer roles
+  (worker, rework, fixer) allow bash
+  by default but deny dangerous/out-of-scope commands (`sudo`, `rm -rf /…`,
   `dd`, `git push`, `ssh`, pipe-to-shell, …). cheaphelp does its own `git push`,
   so agents never touch remotes.
 - **`no_network_tools`** → disables `webfetch`/`websearch` for all agents.
@@ -301,9 +331,9 @@ Source lives in `src/cheaphelp/_internal/`:
 | `conventions.py` | reads `CHEAPHELP.md`/`AGENTS.md`/`CONTRIBUTING.md` into agent context |
 | `pr_state.py` | persists PR ↔ issue link state for the rework stage |
 | `opencode.py` | generate `opencode.json`, run agents headlessly (with `--variant`), parse decisions |
-| `templates/` | bundled agent prompts (responder, planner, worker, reviewer, rework) |
+| `templates/` | bundled agent prompts (responder, planner, worker, reviewer, rework, fixer) |
 | `tasks.py` | task manifest + per-issue task state store |
-| `responder.py` / `planner.py` / `worker.py` / `reviewer.py` / `rework.py` | per-role turn logic |
+| `responder.py` / `planner.py` / `worker.py` / `reviewer.py` / `rework.py` / `fixer.py` | per-role turn logic |
 | `orchestrator.py` | one tick of the state machine (`tick()`, `classify()`, stage dispatch) |
 | `cleanup.py` | prune build clones for closed issues / unregistered repos |
 | `systemd.py` | user service + timer install (continuous-mode by default) |

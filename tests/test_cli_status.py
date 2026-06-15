@@ -9,12 +9,13 @@ from pathlib import Path
 import pytest
 
 from cheaphelp import main
-from cheaphelp._internal import commands
+from cheaphelp._internal import commands, opencode
 from cheaphelp._internal.config import Config, Workspace
 from cheaphelp._internal.env import GITHUB_TOKEN_KEY
 from cheaphelp._internal.github import Comment, Issue
 from cheaphelp._internal.registry import Registry, RepoEntry
 from cheaphelp._internal.responder import BOT_MARKER
+from cheaphelp._internal.spend import DailySpendTracker
 from tests.conftest import _TEST_TOKEN, _FakeGH, _seed_workspace_env, _setup_workspace
 
 # --- status ----------------------------------------------------------------
@@ -480,3 +481,224 @@ def test_status_costs_zero_when_no_cost_file(
     captured = capsys.readouterr().out
     assert "$0.000" in captured
     assert "#7" in captured
+
+
+# --- budget footer -----------------------------------------------------------
+
+
+def test_status_budget_line_shows_spend_and_cap(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Budget line shows formatted spend and cap when a cap is configured."""
+    ws = _setup_workspace(tmp_path)
+    _seed_workspace_env(ws, token=_TEST_TOKEN)
+    ws.save_config(Config.from_dict({"daily_budget_usd": 5.0}))
+
+    Registry(ws.registry_path).add(RepoEntry(owner="octocat", name="hello", enabled=True))
+
+    DailySpendTracker(ws.state_dir).record(opencode.UsageData(cost_usd=1.23))
+
+    fake = _FakeGH("test-token")
+
+    def _factory(token: str, **_kwargs: object) -> _FakeGH:
+        fake.token = token
+        return fake
+
+    monkeypatch.setattr(commands, "GitHubClient", _factory)
+
+    rc = main(["--home", str(ws.home), "status"])
+    assert rc == 0
+
+    captured = capsys.readouterr().out
+    non_empty = [line for line in captured.splitlines() if line.strip()]
+    assert non_empty[-1] == "Budget: $1.230 / $5.000 daily cap"
+
+
+def test_status_budget_line_exhausted(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Budget line shows exhausted variant when spend meets or exceeds cap."""
+    ws = _setup_workspace(tmp_path)
+    _seed_workspace_env(ws, token=_TEST_TOKEN)
+    ws.save_config(Config.from_dict({"daily_budget_usd": 1.0}))
+
+    Registry(ws.registry_path).add(RepoEntry(owner="octocat", name="hello", enabled=True))
+
+    DailySpendTracker(ws.state_dir).record(opencode.UsageData(cost_usd=1.5))
+
+    fake = _FakeGH("test-token")
+
+    def _factory(token: str, **_kwargs: object) -> _FakeGH:
+        fake.token = token
+        return fake
+
+    monkeypatch.setattr(commands, "GitHubClient", _factory)
+
+    rc = main(["--home", str(ws.home), "status"])
+    assert rc == 0
+
+    captured = capsys.readouterr().out
+    non_empty = [line for line in captured.splitlines() if line.strip()]
+    assert non_empty[-1] == "Budget: EXHAUSTED — spent $1.500 of $1.000 daily cap. Resumes tomorrow (UTC)."
+
+
+def test_status_budget_line_omitted_when_cap_is_zero(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Budget line is omitted entirely when daily_budget_usd is 0 (unlimited)."""
+    ws = _setup_workspace(tmp_path)
+    _seed_workspace_env(ws, token=_TEST_TOKEN)
+    # Default config has daily_budget_usd = 0.0; do not override it.
+
+    Registry(ws.registry_path).add(RepoEntry(owner="octocat", name="hello", enabled=True))
+
+    fake = _FakeGH("test-token")
+
+    def _factory(token: str, **_kwargs: object) -> _FakeGH:
+        fake.token = token
+        return fake
+
+    monkeypatch.setattr(commands, "GitHubClient", _factory)
+
+    rc = main(["--home", str(ws.home), "status"])
+    assert rc == 0
+
+    captured = capsys.readouterr().out
+    assert "Budget:" not in captured
+
+
+def test_status_budget_line_zero_spend_with_no_file(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Budget line shows zero spend when daily_spend.json does not exist."""
+    ws = _setup_workspace(tmp_path)
+    _seed_workspace_env(ws, token=_TEST_TOKEN)
+    ws.save_config(Config.from_dict({"daily_budget_usd": 5.0}))
+    # Do NOT create daily_spend.json.
+
+    Registry(ws.registry_path).add(RepoEntry(owner="octocat", name="hello", enabled=True))
+
+    fake = _FakeGH("test-token")
+
+    def _factory(token: str, **_kwargs: object) -> _FakeGH:
+        fake.token = token
+        return fake
+
+    monkeypatch.setattr(commands, "GitHubClient", _factory)
+
+    rc = main(["--home", str(ws.home), "status"])
+    assert rc == 0
+
+    captured = capsys.readouterr().out
+    non_empty = [line for line in captured.splitlines() if line.strip()]
+    assert non_empty[-1] == "Budget: $0.000 / $5.000 daily cap"
+
+
+def test_status_budget_line_zero_spend_after_record(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Budget line shows zero spend after recording zero-cost usage (tracking active)."""
+    ws = _setup_workspace(tmp_path)
+    _seed_workspace_env(ws, token=_TEST_TOKEN)
+    ws.save_config(Config.from_dict({"daily_budget_usd": 5.0}))
+
+    Registry(ws.registry_path).add(RepoEntry(owner="octocat", name="hello", enabled=True))
+
+    # Record zero-cost usage — creates the file.
+    DailySpendTracker(ws.state_dir).record(opencode.UsageData(cost_usd=0.0))
+
+    fake = _FakeGH("test-token")
+
+    def _factory(token: str, **_kwargs: object) -> _FakeGH:
+        fake.token = token
+        return fake
+
+    monkeypatch.setattr(commands, "GitHubClient", _factory)
+
+    rc = main(["--home", str(ws.home), "status"])
+    assert rc == 0
+
+    captured = capsys.readouterr().out
+    assert "Budget: $0.000 / $5.000 daily cap" in captured
+
+
+def test_status_budget_line_is_footer_after_empty_state(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Budget line appears after the 'no enabled repos' empty-state message and is last."""
+    ws = _setup_workspace(tmp_path)
+    _seed_workspace_env(ws, token=_TEST_TOKEN)
+    ws.save_config(Config.from_dict({"daily_budget_usd": 5.0}))
+
+    Registry(ws.registry_path).add(
+        RepoEntry(owner="octocat", name="off", enabled=False),
+    )
+
+    # No enabled repos — GitHubClient is never instantiated.
+    def _exploding_factory(_token: str, **_kwargs: object) -> _FakeGH:
+        msg = "GitHubClient should not be called when no repos are enabled"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(commands, "GitHubClient", _exploding_factory)
+
+    rc = main(["--home", str(ws.home), "status"])
+    assert rc == 0
+
+    captured = capsys.readouterr().out
+    assert "No enabled repositories registered" in captured
+    assert "Budget: $0.000 / $5.000 daily cap" in captured
+    non_empty = [line for line in captured.splitlines() if line.strip()]
+    assert non_empty[-1] == "Budget: $0.000 / $5.000 daily cap"
+
+
+def test_status_budget_line_is_footer_after_repo_listing(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Budget line appears after the per-repo issue listing and is the last non-empty line."""
+    ws = _setup_workspace(tmp_path)
+    _seed_workspace_env(ws, token=_TEST_TOKEN)
+    ws.save_config(Config.from_dict({"daily_budget_usd": 5.0}))
+
+    Registry(ws.registry_path).add(RepoEntry(owner="octocat", name="hello", enabled=True))
+
+    fake = _FakeGH("test-token")
+    fake.issues["octocat/hello"] = [
+        Issue(
+            number=1,
+            title="Open issue",
+            body="",
+            state="open",
+            labels=[],
+            user="alice",
+            html_url="",
+        ),
+    ]
+
+    def _factory(token: str, **_kwargs: object) -> _FakeGH:
+        fake.token = token
+        return fake
+
+    monkeypatch.setattr(commands, "GitHubClient", _factory)
+
+    rc = main(["--home", str(ws.home), "status"])
+    assert rc == 0
+
+    captured = capsys.readouterr().out
+    assert "octocat/hello" in captured
+    assert "#1" in captured
+    non_empty = [line for line in captured.splitlines() if line.strip()]
+    assert non_empty[-1] == "Budget: $0.000 / $5.000 daily cap"

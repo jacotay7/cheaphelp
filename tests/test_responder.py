@@ -184,6 +184,27 @@ def test_build_prompt_conventions_whitespace_only() -> None:
     assert "## Repository conventions" not in prompt
 
 
+def test_responder_prompt_finalize_does_not_say_spec_below() -> None:
+    """The responder prompt must warn the model that `finalize` replies are short.
+
+    `issue_md` is written to `issues.md` on disk, not appended to the GitHub
+    comment, so the reply must not promise a 'spec below'. Without explicit
+    guidance in the prompt, models default to phrasing like 'see the spec
+    below', which leaves readers confused when the comment ends with nothing.
+    """
+    from cheaphelp._internal.templates import load_prompt  # noqa: PLC0415
+
+    prompt = load_prompt("responder")
+    prompt_lower = prompt.lower()
+    # Negative guidance: tell the model not to say 'spec below' / 'full specification below'.
+    assert "spec below" in prompt_lower
+    # Positive guidance: point at the recommended 'planning phase' wording.
+    assert "planning phase" in prompt_lower
+    # A concrete `finalize` JSON example should be present so the model sees the
+    # right shape; the original prompt only modelled a `comment` action.
+    assert '"action": "finalize"' in prompt
+
+
 # --- responder apply_decision label lifecycle --------------------------------
 def test_apply_decision_comment_adds_needs_human_label(tmp_path: Path) -> None:
     """Comment action adds needs_human label after posting a reply."""

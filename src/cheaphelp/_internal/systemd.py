@@ -10,8 +10,8 @@ from __future__ import annotations
 import getpass
 import os
 import re
+import shutil
 import subprocess
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -48,14 +48,32 @@ class UnitFiles:
     timer: str
 
 
+@dataclass
+class Health:
+    """Result of a systemd health check for the cheaphelp timer/service.
+
+    `available` is True when *systemctl* was found on PATH. When it is False,
+    the other fields carry their default (conservative) values so callers can
+    always pattern-match on the dataclass without checking ``available`` first.
+    """
+
+    available: bool
+    installed: bool
+    enabled: bool
+    active: bool
+    last_exit_code: int | None
+
+
 def _exec_start(*, continuous: bool, max_ticks: int, sleep: float) -> str:
-    """Command the service runs. Uses the current interpreter's `-m cheaphelp`.
+    """Command the service runs via the globally-installed ``cheaphelp`` entry point.
+
+    Set up via ``uv tool install --from . cheaphelp``.
 
     In continuous mode, each timer firing drains the backlog (repeated ticks
     until one produces no agent turns, capped at *max_ticks*) instead of doing
     a single tick, so queued work doesn't have to wait for the next firing.
     """
-    cmd = f"{sys.executable} -m cheaphelp run"
+    cmd = "cheaphelp run"
     if continuous:
         cmd += f" --continuous --max-ticks {max_ticks} --sleep {sleep:g}"
     return cmd
@@ -108,6 +126,16 @@ def _systemctl(*args: str) -> subprocess.CompletedProcess[str]:
 def _loginctl(*args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["loginctl", *args],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def _journalctl(*args: str) -> subprocess.CompletedProcess[str]:
+    """Run journalctl --user with args, returning the completed process."""
+    return subprocess.run(
+        ["journalctl", "--user", *args],
         capture_output=True,
         text=True,
         check=False,
@@ -171,8 +199,104 @@ def uninstall() -> list[str]:
 
 
 def status() -> str:
-    """Return human-readable timer status."""
-    result = _systemctl("list-timers", TIMER_NAME, "--no-pager")
-    if result.returncode != 0:
-        return f"could not query timers: {result.stderr.strip()}"
-    return result.stdout.strip() or "no cheaphelp timer found"
+    """Return human-readable status with timer summary, last-run result, and last 5 journal lines.
+
+    Three sections are reported, separated by blank lines:
+
+    1. Timer summary from ``systemctl list-timers`` for the cheaphelp timer.
+    2. Service last-run result from ``systemctl show`` (ActiveState, Result,
+       ExecMainStatus, ActiveEnterTimestamp).
+    3. Last 5 lines of the service journal from ``journalctl``.
+
+    All subprocess failures are handled gracefully — a descriptive fallback
+    message is shown instead of raising an exception.
+    """
+    timer_result = _systemctl("list-timers", TIMER_NAME, "--no-pager")
+    if timer_result.returncode != 0:
+        timer_section = f"could not query timers: {timer_result.stderr.strip()}"
+    else:
+        timer_section = timer_result.stdout.strip() or "no cheaphelp timer found"
+
+    show_result = _systemctl(
+        "show",
+        SERVICE_NAME,
+        "-p",
+        "ActiveState",
+        "-p",
+        "Result",
+        "-p",
+        "ExecMainStatus",
+        "-p",
+        "ActiveEnterTimestamp",
+    )
+    if show_result.returncode != 0 or show_result.stdout.strip() == "":
+        service_section = f"{SERVICE_NAME} not found"
+    else:
+        service_section = show_result.stdout.rstrip()
+
+    journal_result = _journalctl("-u", SERVICE_NAME, "-n", "5", "--no-pager")
+    if journal_result.returncode != 0 or journal_result.stdout.strip() == "":
+        journal_section = "no journal available"
+    else:
+        journal_section = journal_result.stdout.rstrip()
+
+    return f"{timer_section}\n\n{service_section}\n\n{journal_section}"
+
+
+def check_health() -> Health:
+    """Check whether the cheaphelp systemd timer/service is healthy.
+
+    Returns a :class:`Health` dataclass.  When ``systemctl`` is not on PATH,
+    returns ``Health(available=False, …)`` with all other fields at their
+    conservative default (False / None) so callers can always destructure the
+    result safely.
+
+    The function is safe to call from tests — any ``OSError`` from the
+    underlying subprocess calls is caught and results in the same conservative
+    fallback.
+    """
+    if shutil.which("systemctl") is None:
+        return Health(
+            available=False,
+            installed=False,
+            enabled=False,
+            active=False,
+            last_exit_code=None,
+        )
+
+    try:
+        # is-enabled — determines installed + enabled
+        ie = _systemctl("is-enabled", TIMER_NAME)
+        no_such_file = "no such file" in ie.stderr.lower()
+        installed = ie.returncode == 0 and not no_such_file
+        enabled = ie.returncode == 0 and ie.stdout.strip() == "enabled"
+
+        # is-active
+        ia = _systemctl("is-active", TIMER_NAME)
+        active = ia.returncode == 0 and ia.stdout.strip() == "active"
+
+        # ExecMainStatus of the .service
+        es = _systemctl("show", SERVICE_NAME, "-p", "ExecMainStatus", "--value")
+        last_exit_code: int | None = None
+        if es.returncode == 0:
+            raw = es.stdout.strip()
+            try:
+                last_exit_code = int(raw)
+            except (ValueError, TypeError):
+                last_exit_code = None
+
+        return Health(
+            available=True,
+            installed=installed,
+            enabled=enabled,
+            active=active,
+            last_exit_code=last_exit_code,
+        )
+    except OSError:
+        return Health(
+            available=True,
+            installed=False,
+            enabled=False,
+            active=False,
+            last_exit_code=None,
+        )

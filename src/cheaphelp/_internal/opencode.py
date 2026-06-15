@@ -33,7 +33,7 @@ OPENCODE_SCHEMA = "https://opencode.ai/config.json"
 
 # Roles that are allowed to modify files. The responder is strictly read-only;
 # it converses, it does not change the codebase.
-_WRITER_ROLES = {"worker", "rework"}
+_WRITER_ROLES = {"worker", "rework", "fixer"}
 
 # Mirrors what opencode expects: model ids are "openrouter/<openrouter-model-id>".
 _OPENROUTER_PREFIX = "openrouter/"
@@ -328,17 +328,95 @@ def _parse_usage(stdout: str, stderr: str) -> UsageData | None:
     return None
 
 
-# Match the LAST fenced ```json block in a string.
-_JSON_BLOCK_RE = re.compile(r"```json\s*(\{.*?\})\s*```", re.DOTALL)
+# Match ```json fence openings; balanced-brace scanner finds the matching close.
+_JSON_FENCE_RE = re.compile(r"```json\b")
+
+
+def _find_balanced_json_object(text: str, start: int) -> int | None:
+    """Walk from ``text[start] == "{"`` and return index past matching ``}``.
+
+    Tracks string/escape state so braces inside JSON string values are
+    correctly ignored.  Returns ``None`` if the text ends before the
+    matching close brace.
+
+    Parameters:
+        text: the full output text being scanned.
+        start: index of the opening ``{`` character.
+
+    Returns:
+        Index *one past* the matching ``}``, or ``None`` if unbalanced.
+    """
+    in_string = False
+    escape = False
+    depth = 0
+    i = start
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if escape:
+            escape = False
+        elif ch == "\\" and in_string:
+            escape = True
+        elif ch == '"' and not in_string:
+            in_string = True
+        elif ch == '"' and in_string:
+            in_string = False
+        elif not in_string:
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return i + 1
+        i += 1
+    return None
+
+
+def _find_json_block_candidates(text: str) -> list[str]:
+    """Return every properly-fenced JSON block from *text*.
+
+    Locates `` ```json `` fences with a regex, finds the matching balanced
+    brace pair with ``_find_balanced_json_object``, and extracts the JSON
+    string.  Returns an empty list when no valid fenced block is found.
+
+    Parameters:
+        text: the full agent output string to scan.
+
+    Returns:
+        List of JSON object strings (without fences) for every candidate.
+    """
+    candidates: list[str] = []
+    for match in _JSON_FENCE_RE.finditer(text):
+        k = match.end()
+        # Skip ASCII whitespace after the opening fence.
+        while k < len(text) and text[k] in " \t\n\r\f\v":
+            k += 1
+        # Must be followed by a '{'.
+        if k >= len(text) or text[k] != "{":
+            continue
+        end = _find_balanced_json_object(text, k)
+        if end is None:
+            continue
+        # Skip ASCII whitespace after the close brace.
+        m = end
+        while m < len(text) and text[m] in " \t\n\r\f\v":
+            m += 1
+        # Must be followed by closing ```
+        if text.startswith("```", m):
+            candidates.append(text[k:end])
+    return candidates
 
 
 def extract_decision(text: str) -> dict | None:
     """Extract the final ```json decision block from agent output.
 
-    Returns the parsed object, or None if no valid JSON block is found.
+    Uses a two-step approach: a regex locates `` ```json `` fence openings,
+    then a balanced-brace character scanner finds the matching ``}`` so
+    that braces inside JSON string values do not cause truncation.
+    Returns the parsed dict, or ``None`` if no valid JSON block is found.
     """
-    matches = _JSON_BLOCK_RE.findall(text)
-    for candidate in reversed(matches):
+    candidates = _find_json_block_candidates(text)
+    for candidate in reversed(candidates):
         try:
             return json.loads(candidate)
         except json.JSONDecodeError:
@@ -378,6 +456,60 @@ _REPROMPT_SUFFIX = (
     "and nothing else — no prose before or after it. Reply with only that block now."
 )
 
+# Maximum bytes to keep from unparseable agent output (last N bytes).
+_UNPARSED_LOG_BYTES = 65_536
+
+
+def _save_unparsed_output(
+    issue_dir: Path | None,
+    role: str,
+    result: AgentResult,
+) -> None:
+    """Persist raw agent output when parsing failed on a clean exit.
+
+    Writes ``last_unparsed_<role>.log`` to *issue_dir* when the agent exited
+    cleanly (returncode 0) but produced no parseable decision block.  This is a
+    best-effort diagnostic helper — I/O errors are logged and swallowed.
+
+    Parameters:
+        issue_dir: the issue state directory (``None`` to skip).
+        role: the agent role name (e.g. ``"worker"``).
+        result: the agent result to inspect and persist.
+    """
+    if issue_dir is None:
+        return
+    if result.returncode != 0:
+        return
+    if result.decision is not None:
+        return
+
+    try:
+        parts: list[str] = []
+        if result.stdout:
+            parts.append("--- stdout ---")
+            parts.append(result.stdout)
+        if result.stderr:
+            parts.append("--- stderr ---")
+            parts.append(result.stderr)
+
+        body = "\n".join(parts) if parts else "(no output captured)\n"
+
+        encoded = body.encode("utf-8")
+        if len(encoded) > _UNPARSED_LOG_BYTES:
+            encoded = encoded[-_UNPARSED_LOG_BYTES:]
+            body = encoded.decode("utf-8", errors="replace")
+            body = f"... (truncated to last {_UNPARSED_LOG_BYTES} bytes) ...\n{body}"
+
+        issue_dir.mkdir(parents=True, exist_ok=True)
+        (issue_dir / f"last_unparsed_{role}.log").write_text(body, encoding="utf-8")
+    except Exception as exc:  # noqa: BLE001
+        _LOG.warning(
+            "failed to save unparsed output for %s in %s: %s",
+            role,
+            issue_dir,
+            exc,
+        )
+
 
 def run_agent(
     workspace: Workspace,
@@ -387,6 +519,7 @@ def run_agent(
     *,
     cwd: Path,
     timeout: float = 600.0,
+    issue_dir: Path | None = None,
 ) -> AgentResult:
     """Run an opencode agent headlessly and return its result.
 
@@ -397,11 +530,21 @@ def run_agent(
         prompt: the user message handed to the agent.
         cwd: working directory for opencode (usually a repo clone).
         timeout: seconds before the subprocess is killed.
+        issue_dir: issue state directory; when set, unparseable clean-exit
+            output is saved to ``last_unparsed_<role>.log`` in this directory
+            for offline diagnosis.
 
     If `CHEAPHELP_AGENT_MOCK` is set, no subprocess runs; the mock is returned.
+
+    Retries with exponential backoff on timeout, non-zero exit, and clean exit
+    without a parseable decision block, up to ``retry_attempts`` attempts (per
+    config).  On the **final** attempt only, the prompt is appended with the
+    format reminder (``_REPROMPT_SUFFIX``) to give the model one last hint
+    before the output is declared unparseable.
     """
     mock = _mock_result()
     if mock is not None:
+        _save_unparsed_output(issue_dir, role, mock)
         return mock
 
     binary = find_opencode(config)
@@ -453,8 +596,10 @@ def run_agent(
 
     max_attempts = max(1, config.retry_attempts)
     for attempt in range(1, max_attempts + 1):
+        is_last = attempt >= max_attempts
+        current_prompt = f"{prompt}\n\n{_REPROMPT_SUFFIX}" if is_last else prompt
         try:
-            result = _invoke(prompt)
+            result = _invoke(current_prompt)
         except subprocess.TimeoutExpired:
             if attempt >= max_attempts:
                 raise
@@ -471,6 +616,7 @@ def run_agent(
 
         if result.returncode != 0:
             if attempt >= max_attempts:
+                _save_unparsed_output(issue_dir, role, result)
                 return result
             delay = _compute_backoff(attempt, config.retry_base_delay)
             _LOG.warning(
@@ -487,8 +633,23 @@ def run_agent(
         # Clean exit.
         if result.decision is not None:
             return result
-        # Clean exit, no parseable decision: the existing single re-prompt
-        # for a format issue (NOT a transient retry).
-        return _invoke(f"{prompt}\n\n{_REPROMPT_SUFFIX}")
+
+        # Clean exit, no parseable decision: treat as a transient failure and
+        # retry with backoff. The format reminder was already sent on the last
+        # attempt via `current_prompt`; if we still got nothing back, return the
+        # result as-is so the caller sees the unparseable output.
+        if is_last:
+            _save_unparsed_output(issue_dir, role, result)
+            return result
+        delay = _compute_backoff(attempt, config.retry_base_delay)
+        _LOG.warning(
+            "agent %s: attempt %d/%d produced no parseable decision, retrying in %.1fs",
+            role,
+            attempt,
+            max_attempts,
+            delay,
+        )
+        time.sleep(delay)
+        continue
 
     raise RuntimeError("retry loop exited without return")  # pragma: no cover

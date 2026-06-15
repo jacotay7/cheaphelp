@@ -36,6 +36,9 @@ DEFAULT_MODELS: dict[str, str] = {
     # Rework uses the cheap tier for the same reason as the worker — short,
     # well-specified turns addressing individual review comments.
     "rework": "openrouter/deepseek/deepseek-v4-flash",
+    # Fixer repairs a failing quality gate before replanning; like the worker it
+    # makes small, well-scoped code edits, so it runs on the cheap tier.
+    "fixer": "openrouter/deepseek/deepseek-v4-flash",
 }
 
 DEFAULT_LABELS: dict[str, str] = {
@@ -73,6 +76,7 @@ DEFAULT_VARIANTS: dict[str, str] = {
     "worker": "max",
     "reviewer": "",
     "rework": "max",
+    "fixer": "max",
 }
 
 # Sandboxing knobs for the agents. These drive opencode's permission system
@@ -127,6 +131,11 @@ class Config:
     # How many times a worker task may run before a timeout escalates it to
     # needs-human. A timed-out task is reset to pending and retried until this.
     max_task_attempts: int = 2
+    # When the quality gate fails after a build, attempt this many `fixer` agent
+    # turns (re-running the gate after each) to repair the failure before sending
+    # the issue back to the planner. 0 disables the fixer (fail straight to
+    # replan).
+    quality_gate_fix_attempts: int = 1
     # Retry policy for transient GitHub / OpenRouter failures. Each call
     # retries up to `retry_attempts` times with exponential backoff starting
     # from `retry_base_delay` (seconds), jittered ±25%.
@@ -157,6 +166,7 @@ class Config:
             max_issues_per_tick=int(data.get("max_issues_per_tick", 0)),
             max_tasks_per_tick=int(data.get("max_tasks_per_tick", 0)),
             max_task_attempts=int(data.get("max_task_attempts", 2)),
+            quality_gate_fix_attempts=int(data.get("quality_gate_fix_attempts", 1)),
             retry_attempts=int(data.get("retry_attempts", 3)),
             retry_base_delay=float(data.get("retry_base_delay", 1.0)),
             prune_work_clones=bool(data.get("prune_work_clones", True)),
@@ -179,6 +189,7 @@ class Config:
             "max_issues_per_tick": self.max_issues_per_tick,
             "max_tasks_per_tick": self.max_tasks_per_tick,
             "max_task_attempts": self.max_task_attempts,
+            "quality_gate_fix_attempts": self.quality_gate_fix_attempts,
             "retry_attempts": self.retry_attempts,
             "retry_base_delay": self.retry_base_delay,
             "prune_work_clones": self.prune_work_clones,

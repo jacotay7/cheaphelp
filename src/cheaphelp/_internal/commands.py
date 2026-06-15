@@ -30,6 +30,7 @@ from cheaphelp._internal.github import GitHubClient, GitHubError
 from cheaphelp._internal.opencode import UsageData
 from cheaphelp._internal.orchestrator import classify, tick
 from cheaphelp._internal.registry import Registry, RepoEntry, parse_slug
+from cheaphelp._internal.spend import DailySpendTracker
 from cheaphelp._internal.tasks import IssueCostStore, TaskStore
 
 _LOG_TAIL_LINES = 50
@@ -67,7 +68,7 @@ def _format_cost_lines(report: object) -> list[str]:
         for number in sorted(issue_costs):
             by_role = issue_costs[number]
             # Compute issue_total and breakdown_str.
-            role_order = ["responder", "planner", "worker", "reviewer"]
+            role_order = ["responder", "planner", "worker", "fixer", "reviewer"]
             seen: set[str] = set()
             parts: list[str] = []
             issue_total = UsageData()
@@ -97,11 +98,21 @@ def _format_cost_lines(report: object) -> list[str]:
     return lines
 
 
-def _format_budget_line(report: object) -> list[str]:
-    """One-line budget summary for the tick, or [] when unlimited/no spend."""
-    cap = float(getattr(report, "daily_budget", 0.0))
-    spend = float(getattr(report, "daily_spend", 0.0))
-    exhausted = bool(getattr(report, "budget_exhausted", False))
+def _format_budget_line(cap: float, spend: float, exhausted: bool) -> list[str]:
+    """One-line budget summary for the tick, or [] when unlimited/no spend.
+
+    Parameters:
+        cap: The daily budget cap in USD. A value <= 0.0 means unlimited and
+            results in an empty list (nothing to print) when *exhausted* is also
+            ``False``.
+        spend: The cumulative spend today in USD.
+        exhausted: ``True`` when the cap has been reached or exceeded.
+
+    Returns:
+        A list containing the single budget line (to be printed line by line by
+        the caller's for-loop), or ``[]`` when the cap is disabled (<= 0.0) and
+        not exhausted — the caller should print nothing.
+    """
     if cap <= 0.0 and not exhausted:
         return []
     if exhausted:
@@ -109,6 +120,25 @@ def _format_budget_line(report: object) -> list[str]:
             f"Budget: EXHAUSTED — spent ${spend:.3f} of ${cap:.3f} daily cap. Resumes tomorrow (UTC).",
         ]
     return [f"Budget: ${spend:.3f} / ${cap:.3f} daily cap"]
+
+
+def _print_status_budget_summary(ws: Workspace, config: Config) -> None:
+    """Print the daily-budget footer line for ``cheaphelp status`` if a cap is set.
+
+    Reads today's spend from ``ws.state_dir / "daily_spend.json"`` via
+    :class:`DailySpendTracker` and prints a one-line summary in the same format
+    as the tick footer. No-op when ``config.daily_budget_usd <= 0`` (unlimited).
+    Exhaustion is derived from ``spend >= cap`` since the tracker does not
+    persist an exhausted flag — consistent with the read-only snapshot semantics
+    of the ``status`` command (the tick path records exhaustion in fly).
+    """
+    cap = float(config.daily_budget_usd)
+    if cap <= 0.0:
+        return
+    spend = DailySpendTracker(ws.state_dir).daily_spend()
+    exhausted = spend >= cap
+    for line in _format_budget_line(cap=cap, spend=spend, exhausted=exhausted):
+        print(line)
 
 
 # --- init ------------------------------------------------------------------
@@ -375,7 +405,11 @@ def cmd_run(args: argparse.Namespace) -> int:
 
             for cost_line in _format_cost_lines(report):
                 log(cost_line)
-            for budget_line in _format_budget_line(report):
+            for budget_line in _format_budget_line(
+                cap=float(getattr(report, "daily_budget", 0.0)),
+                spend=float(getattr(report, "daily_spend", 0.0)),
+                exhausted=bool(getattr(report, "budget_exhausted", False)),
+            ):
                 log(budget_line)
 
             if getattr(report, "budget_exhausted", False):
@@ -456,10 +490,16 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     ws = _workspace(args)
     ok = True
 
-    def check(label: str, passed: bool, detail: str = "") -> None:
+    def check(label: str, passed: bool, detail: str = "", *, state: str | None = None) -> None:
         nonlocal ok
-        mark = "OK " if passed else "FAIL"
-        ok = ok and passed
+        if state == "skip":
+            mark = "-- "
+        elif passed:
+            mark = "OK "
+        else:
+            mark = "FAIL"
+        if state != "skip":
+            ok = ok and passed
         print(f"  [{mark}] {label}{(' - ' + detail) if detail else ''}")
 
     print(f"Workspace: {ws.home}")
@@ -489,6 +529,23 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     repos = Registry(ws.registry_path).load()
     check("repositories registered", bool(repos), f"{len(repos)} registered")
 
+    health = systemd.check_health()
+    if health.available is False:
+        pass  # no systemctl — skip line entirely
+    elif not health.installed:
+        check("systemd timer: not installed", True, state="skip")
+    elif health.enabled and health.active and health.last_exit_code == 0:
+        check("systemd timer: cheaphelp.timer (enabled, active)", True)
+    elif not health.enabled:
+        check("systemd timer: cheaphelp.timer (not enabled)", False)
+    elif not health.active:
+        check("systemd timer: cheaphelp.timer (not active)", False)
+    else:
+        reason = (
+            f"last run failed: exit {health.last_exit_code}" if health.last_exit_code is not None else "last run failed"
+        )
+        check(f"systemd timer: cheaphelp.timer ({reason})", False)
+
     print("\nModels:")
     for role, model in config.models.items():
         print(f"  {role:<9} {model}")
@@ -512,6 +569,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     repos = [r for r in Registry(ws.registry_path).load() if r.enabled]
     if not repos:
         print("No enabled repositories registered. Add one with `cheaphelp repo add owner/name`.")
+        _print_status_budget_summary(ws, config)
         return 0
 
     title_width = 60
@@ -545,6 +603,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     except GitHubError as exc:
         print(f"GitHub API error: {exc}", file=sys.stderr)
         return 1
+    _print_status_budget_summary(ws, config)
     return 0
 
 
@@ -786,12 +845,13 @@ _CONFIG_SCALAR_KEYS: dict[str, type] = {
     "max_issues_per_tick": int,
     "max_tasks_per_tick": int,
     "max_task_attempts": int,
+    "quality_gate_fix_attempts": int,
     "prune_work_clones": bool,
 }
 
 _CONFIG_DICT_KEYS: dict[str, dict[str, type]] = {
-    "models": {"responder": str, "planner": str, "worker": str, "reviewer": str},
-    "variants": {"responder": str, "planner": str, "worker": str, "reviewer": str},
+    "models": {"responder": str, "planner": str, "worker": str, "fixer": str, "reviewer": str},
+    "variants": {"responder": str, "planner": str, "worker": str, "fixer": str, "reviewer": str},
 }
 
 _OPENSCODE_AFFECTED: set[str] = {"models", "variants"}

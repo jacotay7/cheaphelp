@@ -18,7 +18,7 @@ from cheaphelp._internal.github import GitHubClient
 from cheaphelp._internal.opencode import UsageData
 from cheaphelp._internal.registry import RepoEntry
 from cheaphelp._internal.responder import cheaphelp_message
-from cheaphelp._internal.tasks import TaskStore
+from cheaphelp._internal.tasks import IssueCostStore, TaskStore
 from cheaphelp._internal.worker import branch_name
 
 # Keep the diff we send to the model bounded; cheap context budgets.
@@ -138,6 +138,58 @@ def _save_pr_state(issue_dir: Path, pr: dict, reviewers: list[str], clone_dir: P
     )
 
 
+def _format_cost_table(issue_dir: Path) -> str:
+    """Build a compact Markdown cost section for the PR body, or ``""``.
+
+    Returns a two-line string like::
+
+        **Cost:** $0.045 (1,230 prompt + 890 completion tokens)
+        **Per role:** responder $0.005 · planner $0.012 · worker x2 $0.022 · reviewer $0.006
+
+    Returns ``""`` when the cost file is missing, corrupt, all-zero, or lacks
+    per-role data.
+    """
+    store = IssueCostStore(issue_dir)
+    total = store.load()
+    if total.cost_usd == 0.0 and total.total_tokens == 0:
+        return ""
+
+    by_role = store.load_by_role()
+    if not by_role:
+        return ""
+
+    role_counts = store.load_role_counts()
+
+    # Same ordering convention as commands._format_cost_lines.
+    role_order = ["responder", "planner", "worker", "fixer", "reviewer"]
+    seen: set[str] = set()
+    parts: list[str] = []
+
+    for role in role_order:
+        if role in by_role:
+            seen.add(role)
+            cost_usd = by_role[role].cost_usd
+            count = role_counts.get(role, 1)
+            if count > 1:
+                parts.append(f"{role} x{count} ${cost_usd:.3f}")
+            else:
+                parts.append(f"{role} ${cost_usd:.3f}")
+
+    # Remaining roles (outside the stable order).
+    for role in sorted(by_role):
+        if role not in seen:
+            cost_usd = by_role[role].cost_usd
+            count = role_counts.get(role, 1)
+            if count > 1:
+                parts.append(f"{role} x{count} ${cost_usd:.3f}")
+            else:
+                parts.append(f"{role} ${cost_usd:.3f}")
+
+    total_line = f"**Cost:** ${total.cost_usd:.3f} ({total.prompt_tokens:,} prompt + {total.completion_tokens:,} completion tokens)"
+    per_role_line = f"**Per role:** {' · '.join(parts)}"
+    return f"{total_line}\n{per_role_line}"
+
+
 def apply_review(
     gh: GitHubClient,
     workspace: Workspace,
@@ -173,13 +225,12 @@ def apply_review(
         body = str(decision.get("pr_body") or "").strip()
         reviewers = config.pr_reviewers or [repo.owner]
         mentions = " ".join(f"@{r}" for r in reviewers)
-        body = cheaphelp_message(
-            f"{body}\n\nCloses #{number}\n\n"
-            f"Requested reviewer(s): {mentions}\n\n"
-            "_Opened by cheaphelp; awaiting human review._",
-            "reviewer",
-            config,
-        )
+        extra = f"{body}\n\nCloses #{number}\n\nRequested reviewer(s): {mentions}"
+        cost_section = _format_cost_table(issue_dir)
+        if cost_section:
+            extra += f"\n\n{cost_section}"
+        extra += "\n\n_Opened by cheaphelp; awaiting human review._"
+        body = cheaphelp_message(extra, "reviewer", config)
         try:
             pr = gh.create_pull_request(
                 repo.owner,
@@ -256,7 +307,15 @@ def review_issue(
     conventions = read_conventions(clone_dir)
     prompt = build_prompt(issue_md, name_status, full_diff, _collect_summaries(store), conventions=conventions)
 
-    result = opencode.run_agent(workspace, config, "reviewer", prompt, cwd=clone_dir, timeout=config.agent_timeout)
+    result = opencode.run_agent(
+        workspace,
+        config,
+        "reviewer",
+        prompt,
+        cwd=clone_dir,
+        timeout=config.agent_timeout,
+        issue_dir=issue_dir,
+    )
     usage = result.usage
     if result.decision is None:
         return ReviewResult(number=number, decision="none", error="unparseable", usage=usage)
