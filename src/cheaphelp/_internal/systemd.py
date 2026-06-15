@@ -11,7 +11,6 @@ import os
 import re
 import shutil
 import subprocess
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -65,13 +64,15 @@ class Health:
 
 
 def _exec_start(*, continuous: bool, max_ticks: int, sleep: float) -> str:
-    """Command the service runs. Uses the current interpreter's `-m cheaphelp`.
+    """Command the service runs via the globally-installed ``cheaphelp`` entry point.
+
+    Set up via ``uv tool install --from . cheaphelp``.
 
     In continuous mode, each timer firing drains the backlog (repeated ticks
     until one produces no agent turns, capped at *max_ticks*) instead of doing
     a single tick, so queued work doesn't have to wait for the next firing.
     """
-    cmd = f"{sys.executable} -m cheaphelp run"
+    cmd = "cheaphelp run"
     if continuous:
         cmd += f" --continuous --max-ticks {max_ticks} --sleep {sleep:g}"
     return cmd
