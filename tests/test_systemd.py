@@ -10,6 +10,7 @@ import pytest
 from cheaphelp._internal import (
     systemd,
 )
+from cheaphelp._internal.config import Workspace
 
 
 # --- systemd ---------------------------------------------------------------
@@ -46,9 +47,9 @@ def test_render_units_no_continuous(tmp_path: Path) -> None:
 
 
 # --- install --linger -------------------------------------------------------
-def _setup_workspace(tmp_path: Path) -> object:
+def _setup_workspace(tmp_path: Path) -> Workspace:
     """Build a fresh, initialised workspace under ``tmp_path``."""
-    from cheaphelp._internal.config import Config, Workspace  # noqa: PLC0415
+    from cheaphelp._internal.config import Config  # noqa: PLC0415
 
     ws = Workspace(tmp_path)
     ws.ensure()
