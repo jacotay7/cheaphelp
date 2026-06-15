@@ -266,7 +266,7 @@ def _run_rework(
 
     try:
         result = opencode.run_agent(
-            workspace, config, "rework", prompt, cwd=work_dir, timeout=config.agent_timeout, issue_dir=issue_dir
+            workspace, config, "rework", prompt, cwd=work_dir, timeout=config.agent_timeout, issue_dir=issue_dir,
         )
     except subprocess.TimeoutExpired:
         new_attempts = rework_attempts + 1
@@ -301,7 +301,7 @@ def _run_rework(
                 repo.name,
                 number,
                 cheaphelp_message(
-                    f"Rework agent produced no parseable result after {new_attempts} attempt(s). Escalating to human.",
+                    f"Rework agent produced no parseable result after {new_attempts} attempt(s). Escalating to human. (see `last_unparsed_rework.log`)",
                     "rework",
                     config,
                 ),
