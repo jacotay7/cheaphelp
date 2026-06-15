@@ -169,7 +169,7 @@ def _record_cost(
     """Record token/cost data from an agent turn and persist to the daily tracker."""
     if usage is None:
         return
-    IssueCostStore(workspace.issue_dir(repo.owner, repo.name, number)).add(usage)
+    IssueCostStore(workspace.issue_dir(repo.owner, repo.name, number)).add(usage, role=role)
     report.cost = report.cost + usage
     by_issue = report.issue_costs.setdefault(number, {})
     by_issue.setdefault(role, []).append(usage)
