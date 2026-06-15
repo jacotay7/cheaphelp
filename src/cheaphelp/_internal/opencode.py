@@ -328,17 +328,95 @@ def _parse_usage(stdout: str, stderr: str) -> UsageData | None:
     return None
 
 
-# Match the LAST fenced ```json block in a string.
-_JSON_BLOCK_RE = re.compile(r"```json\s*(\{.*?\})\s*```", re.DOTALL)
+# Match ```json fence openings; balanced-brace scanner finds the matching close.
+_JSON_FENCE_RE = re.compile(r"```json\b")
+
+
+def _find_balanced_json_object(text: str, start: int) -> int | None:
+    """Walk from ``text[start] == "{"`` and return index past matching ``}``.
+
+    Tracks string/escape state so braces inside JSON string values are
+    correctly ignored.  Returns ``None`` if the text ends before the
+    matching close brace.
+
+    Parameters:
+        text: the full output text being scanned.
+        start: index of the opening ``{`` character.
+
+    Returns:
+        Index *one past* the matching ``}``, or ``None`` if unbalanced.
+    """
+    in_string = False
+    escape = False
+    depth = 0
+    i = start
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if escape:
+            escape = False
+        elif ch == "\\" and in_string:
+            escape = True
+        elif ch == '"' and not in_string:
+            in_string = True
+        elif ch == '"' and in_string:
+            in_string = False
+        elif not in_string:
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return i + 1
+        i += 1
+    return None
+
+
+def _find_json_block_candidates(text: str) -> list[str]:
+    """Return every properly-fenced JSON block from *text*.
+
+    Locates `` ```json `` fences with a regex, finds the matching balanced
+    brace pair with ``_find_balanced_json_object``, and extracts the JSON
+    string.  Returns an empty list when no valid fenced block is found.
+
+    Parameters:
+        text: the full agent output string to scan.
+
+    Returns:
+        List of JSON object strings (without fences) for every candidate.
+    """
+    candidates: list[str] = []
+    for match in _JSON_FENCE_RE.finditer(text):
+        k = match.end()
+        # Skip ASCII whitespace after the opening fence.
+        while k < len(text) and text[k] in " \t\n\r\f\v":
+            k += 1
+        # Must be followed by a '{'.
+        if k >= len(text) or text[k] != "{":
+            continue
+        end = _find_balanced_json_object(text, k)
+        if end is None:
+            continue
+        # Skip ASCII whitespace after the close brace.
+        m = end
+        while m < len(text) and text[m] in " \t\n\r\f\v":
+            m += 1
+        # Must be followed by closing ```
+        if text.startswith("```", m):
+            candidates.append(text[k:end])
+    return candidates
 
 
 def extract_decision(text: str) -> dict | None:
     """Extract the final ```json decision block from agent output.
 
-    Returns the parsed object, or None if no valid JSON block is found.
+    Uses a two-step approach: a regex locates `` ```json `` fence openings,
+    then a balanced-brace character scanner finds the matching ``}`` so
+    that braces inside JSON string values do not cause truncation.
+    Returns the parsed dict, or ``None`` if no valid JSON block is found.
     """
-    matches = _JSON_BLOCK_RE.findall(text)
-    for candidate in reversed(matches):
+    candidates = _find_json_block_candidates(text)
+    for candidate in reversed(candidates):
         try:
             return json.loads(candidate)
         except json.JSONDecodeError:
@@ -457,6 +535,12 @@ def run_agent(
             for offline diagnosis.
 
     If `CHEAPHELP_AGENT_MOCK` is set, no subprocess runs; the mock is returned.
+
+    Retries with exponential backoff on timeout, non-zero exit, and clean exit
+    without a parseable decision block, up to ``retry_attempts`` attempts (per
+    config).  On the **final** attempt only, the prompt is appended with the
+    format reminder (``_REPROMPT_SUFFIX``) to give the model one last hint
+    before the output is declared unparseable.
     """
     mock = _mock_result()
     if mock is not None:
@@ -512,8 +596,10 @@ def run_agent(
 
     max_attempts = max(1, config.retry_attempts)
     for attempt in range(1, max_attempts + 1):
+        is_last = attempt >= max_attempts
+        current_prompt = f"{prompt}\n\n{_REPROMPT_SUFFIX}" if is_last else prompt
         try:
-            result = _invoke(prompt)
+            result = _invoke(current_prompt)
         except subprocess.TimeoutExpired:
             if attempt >= max_attempts:
                 raise
@@ -547,10 +633,23 @@ def run_agent(
         # Clean exit.
         if result.decision is not None:
             return result
-        # Clean exit, no parseable decision: the existing single re-prompt
-        # for a format issue (NOT a transient retry).
-        reprompt_result = _invoke(f"{prompt}\n\n{_REPROMPT_SUFFIX}")
-        _save_unparsed_output(issue_dir, role, reprompt_result)
-        return reprompt_result
+
+        # Clean exit, no parseable decision: treat as a transient failure and
+        # retry with backoff. The format reminder was already sent on the last
+        # attempt via `current_prompt`; if we still got nothing back, return the
+        # result as-is so the caller sees the unparseable output.
+        if is_last:
+            _save_unparsed_output(issue_dir, role, result)
+            return result
+        delay = _compute_backoff(attempt, config.retry_base_delay)
+        _LOG.warning(
+            "agent %s: attempt %d/%d produced no parseable decision, retrying in %.1fs",
+            role,
+            attempt,
+            max_attempts,
+            delay,
+        )
+        time.sleep(delay)
+        continue
 
     raise RuntimeError("retry loop exited without return")  # pragma: no cover

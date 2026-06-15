@@ -30,6 +30,49 @@ def test_extract_decision_none_when_absent() -> None:
     assert opencode.extract_decision("just prose, no json") is None
 
 
+def test_extract_decision_handles_braces_in_string_values() -> None:
+    """Braces inside JSON string values must not break parsing."""
+    out = '```json\n{"action": "comment", "summary": "changed {foo, bar} in file.py"}\n```'
+    decision = opencode.extract_decision(out)
+    assert decision is not None
+    assert decision == {"action": "comment", "summary": "changed {foo, bar} in file.py"}
+
+
+def test_extract_decision_handles_nested_object() -> None:
+    """Nested JSON structures are parsed correctly."""
+    out = '```json\n{"data": {"x": 1, "y": [1, 2, 3]}}\n```'
+    decision = opencode.extract_decision(out)
+    assert decision is not None
+    assert decision == {"data": {"x": 1, "y": [1, 2, 3]}}
+
+
+def test_extract_decision_handles_escaped_quotes() -> None:
+    """Escaped quotes inside JSON string values round-trip intact."""
+    out = '```json\n{"key": "value with \\"escaped\\" quote"}\n```'
+    decision = opencode.extract_decision(out)
+    assert decision is not None
+    assert decision == {"key": 'value with "escaped" quote'}
+
+
+def test_extract_decision_prefers_last_block_with_nested_braces() -> None:
+    """When multiple ```json blocks exist, the last valid one wins, even with nested braces."""
+    out = (
+        '```json\n{"action": "first", "note": "plain"}\n```\n'
+        "more text\n"
+        '```json\n{"action": "second", "summary": "changed {foo, bar}"}\n```'
+    )
+    decision = opencode.extract_decision(out)
+    assert decision is not None
+    assert decision == {"action": "second", "summary": "changed {foo, bar}"}
+
+
+def test_extract_decision_ignores_unclosed_fence() -> None:
+    """A ```json fence that never reaches a balanced close returns None."""
+    out = 'some text\n```json\n{"action": "broken"'
+    decision = opencode.extract_decision(out)
+    assert decision is None
+
+
 def test_run_agent_reprompts_once_on_empty_decision(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -50,10 +93,109 @@ def test_run_agent_reprompts_once_on_empty_decision(
 
     monkeypatch.setattr(opencode.subprocess, "run", fake_run)
 
-    result = opencode.run_agent(ws, Config(), "worker", "do it", cwd=tmp_path)
+    cfg = Config.from_dict({"retry_base_delay": 0.01, "retry_attempts": 2})
+    result = opencode.run_agent(ws, cfg, "worker", "do it", cwd=tmp_path)
     assert result.decision == {"status": "done"}
     assert len(calls) == 2  # re-prompted exactly once
-    assert opencode._REPROMPT_SUFFIX in calls[1][-1]  # the reminder rode along
+    assert opencode._REPROMPT_SUFFIX in calls[1][-1]  # the reminder rode along on the LAST attempt
+
+
+def test_run_agent_retries_on_unparseable_with_backoff(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Clean exit with no parseable decision retries with exponential backoff."""
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    monkeypatch.setattr(opencode, "find_opencode", lambda _cfg: Path("opencode"))
+
+    calls: list[list[str]] = []
+    sleeps: list[float] = []
+
+    def fake_run(cmd: list[str], **_kwargs: object) -> object:
+        calls.append(cmd)
+        return SimpleNamespace(returncode=0, stdout="thinking out loud, no json", stderr="")
+
+    def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr(opencode.subprocess, "run", fake_run)
+    monkeypatch.setattr(opencode.time, "sleep", fake_sleep)
+
+    cfg = Config.from_dict({"retry_base_delay": 0.01, "retry_attempts": 3})
+
+    result = opencode.run_agent(ws, cfg, "worker", "do it", cwd=tmp_path)
+    assert result.decision is None
+    assert result.returncode == 0
+    assert result.ok is True
+    assert len(calls) == 3
+    assert len(sleeps) == 2
+    assert opencode._REPROMPT_SUFFIX not in calls[0][-1]
+    assert opencode._REPROMPT_SUFFIX in calls[-1][-1]
+    # Attempt 1: base * 2^(0) = 0.01, jitter ±0.25 → [0.0075, 0.0125]
+    assert 0.0075 <= sleeps[0] <= 0.0125
+    # Attempt 2: base * 2^(1) = 0.02, jitter ±0.25 → [0.015, 0.025]
+    assert 0.015 <= sleeps[1] <= 0.025
+
+
+def test_run_agent_unparseable_recovers_within_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After one unparseable attempt, the second produces valid JSON; the third must not run."""
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    monkeypatch.setattr(opencode, "find_opencode", lambda _cfg: Path("opencode"))
+
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **_kwargs: object) -> object:
+        calls.append(cmd)
+        if len(calls) == 1:
+            return SimpleNamespace(returncode=0, stdout="thinking out loud, no json", stderr="")
+        # 2nd call returns valid JSON.
+        return SimpleNamespace(returncode=0, stdout='```json\n{"status": "done"}\n```', stderr="")
+
+    monkeypatch.setattr(opencode.subprocess, "run", fake_run)
+
+    cfg = Config.from_dict({"retry_base_delay": 0.01, "retry_attempts": 3})
+    result = opencode.run_agent(ws, cfg, "worker", "do it", cwd=tmp_path)
+    assert result.decision == {"status": "done"}
+    assert len(calls) == 2
+    # The 2nd call is NOT the last attempt (retry_attempts=3), so no suffix.
+    assert opencode._REPROMPT_SUFFIX not in calls[1][-1]
+
+
+def test_run_agent_exhausted_unparseable_returns_last_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """All attempts produce unparseable output; the final result with reprrompt is returned."""
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    monkeypatch.setattr(opencode, "find_opencode", lambda _cfg: Path("opencode"))
+
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **_kwargs: object) -> object:
+        calls.append(cmd)
+        return SimpleNamespace(returncode=0, stdout="always just prose", stderr="")
+
+    monkeypatch.setattr(opencode.subprocess, "run", fake_run)
+
+    cfg = Config.from_dict({"retry_base_delay": 0.01, "retry_attempts": 2})
+    result = opencode.run_agent(ws, cfg, "worker", "do it", cwd=tmp_path)
+    assert len(calls) == 2
+    assert opencode._REPROMPT_SUFFIX in calls[-1][-1]
+    assert result.decision is None
+    assert result.returncode == 0
+    assert result.ok is True
 
 
 def test_run_agent_no_reprompt_when_decision_present(
