@@ -5,3 +5,7 @@ hide:
 ---
 
 # ::: cheaphelp
+    options:
+      members:
+      - get_parser
+      - main
