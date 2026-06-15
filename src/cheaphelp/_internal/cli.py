@@ -246,6 +246,15 @@ def get_parser() -> argparse.ArgumentParser:
         metavar="N",
         help="Seconds to sleep between ticks in continuous mode (default 30).",
     )
+    p_sys_install.add_argument(
+        "--linger",
+        action="store_true",
+        help=(
+            "After installing the timer, run `loginctl enable-linger $USER` so the "
+            "user timer keeps firing after logout. Suppresses the lingering tip. "
+            "Failures are reported as warnings; install is not aborted."
+        ),
+    )
     p_sys_install.set_defaults(func=commands.cmd_systemd_install)
     sys_sub.add_parser("uninstall", help="Stop and remove the timer.").set_defaults(
         func=commands.cmd_systemd_uninstall,
