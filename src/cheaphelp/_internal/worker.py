@@ -97,7 +97,13 @@ def run_task(
     usage: UsageData | None = None
     try:
         result = opencode.run_agent(
-            workspace, config, "worker", prompt, cwd=clone_dir, timeout=config.agent_timeout, issue_dir=issue_dir,
+            workspace,
+            config,
+            "worker",
+            prompt,
+            cwd=clone_dir,
+            timeout=config.agent_timeout,
+            issue_dir=issue_dir,
         )
         usage = result.usage
     except subprocess.TimeoutExpired:
@@ -118,7 +124,9 @@ def run_task(
     if result.decision is None:
         # No parseable decision: leave whatever changes exist but mark blocked.
         store.set_status(
-            task.id, BLOCKED, summary="Worker produced no parseable result (see `last_unparsed_worker.log`).",
+            task.id,
+            BLOCKED,
+            summary="Worker produced no parseable result (see `last_unparsed_worker.log`).",
         )
         return WorkResult(task_id=task.id, status=BLOCKED, error="unparseable")
 

@@ -266,7 +266,13 @@ def _run_rework(
 
     try:
         result = opencode.run_agent(
-            workspace, config, "rework", prompt, cwd=work_dir, timeout=config.agent_timeout, issue_dir=issue_dir,
+            workspace,
+            config,
+            "rework",
+            prompt,
+            cwd=work_dir,
+            timeout=config.agent_timeout,
+            issue_dir=issue_dir,
         )
     except subprocess.TimeoutExpired:
         new_attempts = rework_attempts + 1

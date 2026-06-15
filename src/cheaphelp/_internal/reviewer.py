@@ -257,7 +257,13 @@ def review_issue(
     prompt = build_prompt(issue_md, name_status, full_diff, _collect_summaries(store), conventions=conventions)
 
     result = opencode.run_agent(
-        workspace, config, "reviewer", prompt, cwd=clone_dir, timeout=config.agent_timeout, issue_dir=issue_dir
+        workspace,
+        config,
+        "reviewer",
+        prompt,
+        cwd=clone_dir,
+        timeout=config.agent_timeout,
+        issue_dir=issue_dir,
     )
     usage = result.usage
     if result.decision is None:

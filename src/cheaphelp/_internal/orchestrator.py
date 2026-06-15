@@ -249,7 +249,13 @@ def _run_responder(gh, workspace, config, repo, issue, comments, cwd, log, repor
     log(f"  · {repo.slug}#{issue.number}: running responder ({config.model_for('responder')})…")
     issue_dir = workspace.issue_dir(repo.owner, repo.name, issue.number)
     result = opencode.run_agent(
-        workspace, config, "responder", prompt, cwd=cwd, timeout=config.agent_timeout, issue_dir=issue_dir
+        workspace,
+        config,
+        "responder",
+        prompt,
+        cwd=cwd,
+        timeout=config.agent_timeout,
+        issue_dir=issue_dir,
     )
     _record_cost(workspace, repo, issue.number, "responder", result.usage, report, tracker)
     if result.decision is None:
@@ -283,7 +289,13 @@ def _run_planner(gh, workspace, config, repo, issue, cwd, log, report, tracker=N
     )
     log(f"  · {repo.slug}#{issue.number}: running planner ({config.model_for('planner')})…")
     result = opencode.run_agent(
-        workspace, config, "planner", prompt, cwd=cwd, timeout=config.agent_timeout, issue_dir=issue_dir
+        workspace,
+        config,
+        "planner",
+        prompt,
+        cwd=cwd,
+        timeout=config.agent_timeout,
+        issue_dir=issue_dir,
     )
     _record_cost(workspace, repo, issue.number, "planner", result.usage, report, tracker)
     if result.decision is None:
