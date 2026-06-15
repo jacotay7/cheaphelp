@@ -767,6 +767,35 @@ def test_run_responder_skips_cost_when_usage_none(
     assert not cost_path.exists()
 
 
+def test_record_cost_persists_per_role_breakdown(
+    tmp_path: Path,
+) -> None:
+    """_record_cost with a role persists per-role data in cost.json."""
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    ws.save_config(Config())
+
+    repo = RepoEntry(owner="octocat", name="hello")
+    number = 42
+    usage = opencode.UsageData(prompt_tokens=100, completion_tokens=50, cost_usd=0.005)
+    report = orchestrator.RepoReport(slug=repo.slug)
+
+    orchestrator._record_cost(ws, repo, number, "responder", usage, report, tracker=None)
+
+    # Verify per-role data was persisted.
+    store = IssueCostStore(ws.issue_dir(repo.owner, repo.name, number))
+    by_role = store.load_by_role()
+    assert "responder" in by_role
+    assert by_role["responder"] == usage
+
+    counts = store.load_role_counts()
+    assert counts == {"responder": 1}
+
+    # Total is also available.
+    total = store.load()
+    assert total == usage
+
+
 def test_tick_report_total_cost_sums_across_repos(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
