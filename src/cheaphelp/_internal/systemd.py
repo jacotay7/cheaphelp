@@ -104,6 +104,16 @@ def _systemctl(*args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+def _journalctl(*args: str) -> subprocess.CompletedProcess[str]:
+    """Run journalctl --user with args, returning the completed process."""
+    return subprocess.run(
+        ["journalctl", "--user", *args],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
 def install(
     *,
     home: Path | None,
@@ -148,8 +158,45 @@ def uninstall() -> list[str]:
 
 
 def status() -> str:
-    """Return human-readable timer status."""
-    result = _systemctl("list-timers", TIMER_NAME, "--no-pager")
-    if result.returncode != 0:
-        return f"could not query timers: {result.stderr.strip()}"
-    return result.stdout.strip() or "no cheaphelp timer found"
+    """Return human-readable status with timer summary, last-run result, and last 5 journal lines.
+
+    Three sections are reported, separated by blank lines:
+
+    1. Timer summary from ``systemctl list-timers`` for the cheaphelp timer.
+    2. Service last-run result from ``systemctl show`` (ActiveState, Result,
+       ExecMainStatus, ActiveEnterTimestamp).
+    3. Last 5 lines of the service journal from ``journalctl``.
+
+    All subprocess failures are handled gracefully — a descriptive fallback
+    message is shown instead of raising an exception.
+    """
+    timer_result = _systemctl("list-timers", TIMER_NAME, "--no-pager")
+    if timer_result.returncode != 0:
+        timer_section = f"could not query timers: {timer_result.stderr.strip()}"
+    else:
+        timer_section = timer_result.stdout.strip() or "no cheaphelp timer found"
+
+    show_result = _systemctl(
+        "show",
+        SERVICE_NAME,
+        "-p",
+        "ActiveState",
+        "-p",
+        "Result",
+        "-p",
+        "ExecMainStatus",
+        "-p",
+        "ActiveEnterTimestamp",
+    )
+    if show_result.returncode != 0 or show_result.stdout.strip() == "":
+        service_section = f"{SERVICE_NAME} not found"
+    else:
+        service_section = show_result.stdout.rstrip()
+
+    journal_result = _journalctl("-u", SERVICE_NAME, "-n", "5", "--no-pager")
+    if journal_result.returncode != 0 or journal_result.stdout.strip() == "":
+        journal_section = "no journal available"
+    else:
+        journal_section = journal_result.stdout.rstrip()
+
+    return f"{timer_section}\n\n{service_section}\n\n{journal_section}"
