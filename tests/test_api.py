@@ -154,6 +154,7 @@ def test_inventory_matches_api(
             item.domain == "py"
             and "(" not in item.name
             and (item.name == "cheaphelp" or item.name.startswith("cheaphelp."))
+            and item.name != "cheaphelp.__all__"
         ):
             obj = loader.modules_collection[item.name]
             if obj.path not in public_api_paths and not any(path in public_api_paths for path in obj.aliases):

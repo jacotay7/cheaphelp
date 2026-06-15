@@ -1,17 +1,18 @@
-# cheaphelp
+---
+title: Getting started
+---
 
-[![ci](https://github.com/jacotay7/cheaphelp/actions/workflows/ci.yml/badge.svg)](https://github.com/jacotay7/cheaphelp/actions/workflows/ci.yml)
-[![documentation](https://img.shields.io/badge/docs-zensical-FF9100.svg?style=flat)](https://jacotay7.github.io/cheaphelp/)
+This page covers the requirements, installation, and quick-start steps to get
+cheaphelp running on your machine.
 
-An AI software-engineer for your GitHub repositories. cheaphelp installs as a
-background service on your machine, watches the repos you register, and runs a
-team of narrow AI agents — powered by **cheap [OpenRouter](https://openrouter.ai)
-models** through the **[opencode](https://opencode.ai)** terminal harness — to
-triage issues, plan work, implement it, and open pull requests for human review.
+## Requirements
 
-> **Status: full pipeline wired and exercised live.** All roles run end-to-end
-> against a real repository; expect to keep tuning prompts and hardening edge
-> cases.
+- Python ≥ 3.10 (developed on 3.13)
+- [`uv`](https://docs.astral.sh/uv/)
+- [opencode](https://opencode.ai): `curl -fsSL https://opencode.ai/install | bash` (or `npm i -g opencode-ai`)
+- A GitHub personal access token (repo + workflow + issues scope) and an OpenRouter API key
+  — the `workflow` scope is required so cheaphelp can push branches that touch
+  `.github/workflows/`; without it those pushes are rejected and the PR never opens
 
 ## Install
 
@@ -59,24 +60,27 @@ cheaphelp run
 cheaphelp run --continuous
 
 # 8. Install the background timer (default every 10 minutes; each firing
-#    runs `cheaphelp run --continuous` by default, see the docs).
+#    runs `cheaphelp run --continuous` by default, see "Background service").
 cheaphelp systemd install --interval 10m
 cheaphelp systemd status
 ```
 
 > **Upgrading.** After pulling new code, re-run `uv tool install --from . --reinstall cheaphelp` to refresh the global command. A plain `git pull` updates the source tree but does NOT refresh the installed binary, and `uv run cheaphelp` would then diverge from your checkout.
 
-## Documentation
+### Running modes
 
-- [Getting started](docs/getting-started.md) — install, requirements, running modes
-- [Pipeline](docs/pipeline.md) — how the agents collaborate and the quality gate
-- [Configuration](docs/configuration.md) — `config.json` fields, models, budget knobs
-- [Workspace](docs/workspace.md) — files cheaphelp writes to disk
-- [Sandboxing](docs/sandboxing.md) — how agents are isolated and its limits
-- [Cost tracking](docs/cost-tracking.md) — daily budget and per-issue cost reporting
-- [Background service](docs/background-service.md) — running under the systemd timer
-- [Dev guide](docs/dev-guide.md) — for contributors (testing, source layout, mocking opencode)
+```bash
+cheaphelp run                       # one tick across all enabled repos
+cheaphelp run -n 5 --sleep 60       # 5 ticks, sleeping 60s between each
+cheaphelp run --continuous          # repeat ticks until one is idle (no agent turns),
+                                     # capped at --max-ticks (default 20)
+cheaphelp run --dry-run             # report planned actions, no API/filesystem changes
+                                     # (combine with any of the above)
+```
 
-## For contributors
+`--continuous` is useful both for clearing a backlog by hand and as the default
+mode for the systemd timer (see [Background service](background-service.md)).
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) and the [Dev guide](docs/dev-guide.md).
+---
+
+Next: see [Pipeline](pipeline.md) to understand what runs.
