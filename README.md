@@ -78,10 +78,25 @@ pipeline behaves.
   — the `workflow` scope is required so cheaphelp can push branches that touch
   `.github/workflows/`; without it those pushes are rejected and the PR never opens
 
+## Install
+
+The recommended way to install the `cheaphelp` CLI on your machine:
+
+```bash
+pipx install cheaphelp
+# or, if you don't use pipx:
+pip install --user cheaphelp
+```
+
+For development (running from a clone, contributing, or testing unreleased
+changes), use `uv sync` inside the clone and invoke the CLI as
+`uv run cheaphelp …` — see [Quick start](#quick-start) step 1.
+
 ## Quick start
 
 ```bash
-# 1. Install (from a clone, for now)
+# 1. (Development install only — end users should `pipx install cheaphelp`.)
+git clone https://github.com/jacotay7/cheaphelp && cd cheaphelp
 uv sync
 
 # 2. Create your machine-local workspace (~/.cheaphelp) and store secrets.
