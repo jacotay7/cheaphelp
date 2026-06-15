@@ -91,14 +91,6 @@ icon = "fontawesome/brands/github"
 link = "https://github.com/jacotay7"
 
 [[project.extra.social]]
-icon = "fontawesome/brands/twitter"
-link = "https://twitter.com/pawamoy"
-
-[[project.extra.social]]
-icon = "fontawesome/brands/gitter"
-link = "https://gitter.im/cheaphelp/community"
-
-[[project.extra.social]]
 icon = "fontawesome/brands/python"
 link = "https://pypi.org/project/cheaphelp/"
 

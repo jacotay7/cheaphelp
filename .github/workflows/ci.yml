@@ -28,7 +28,7 @@ jobs:
 
   quality:
     # Quality runs once, on Ubuntu with the latest stable Python.
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
 
     steps:
     - name: Checkout
@@ -59,7 +59,7 @@ jobs:
     # Type-check runs once on the declared Python floor (3.10) so that
     # version-sensitive type errors (e.g. typing.Self, 3.11+ stdlib APIs)
     # are caught before merge rather than at runtime on 3.10 users.
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
 
     steps:
     - name: Checkout
@@ -99,7 +99,7 @@ jobs:
         - highest
         - lowest-direct
 
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
 
     steps:
     - name: Checkout
