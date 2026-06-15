@@ -16,10 +16,20 @@ nav = [
     { "Credits" = "credits.md" },
     { "License" = "license.md" },
   ] },
+  { "User Guide" = [
+    { "Getting started" = "getting-started.md" },
+    { "Pipeline" = "pipeline.md" },
+    { "Configuration" = "configuration.md" },
+    { "Workspace" = "workspace.md" },
+    { "Sandboxing" = "sandboxing.md" },
+    { "Cost tracking" = "cost-tracking.md" },
+    { "Background service" = "background-service.md" },
+  ] },
   { "API reference" = "reference/api.md" },
   { "Development" = [
     { "Contributing" = "contributing.md" },
     { "Code of Conduct" = "code_of_conduct.md" },
+    { "Dev guide" = "dev-guide.md" },
   ] },
 ]
 
