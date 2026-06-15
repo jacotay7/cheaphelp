@@ -47,8 +47,9 @@ def test_render_units_no_continuous(tmp_path: Path) -> None:
 
 
 def test_render_units_uses_bare_entry_point(tmp_path: Path) -> None:
-    """Regression: service units must use the bare ``cheaphelp`` entry point,
-    never a ``python -m cheaphelp`` fallback.
+    """Regression: service units must use the bare ``cheaphelp`` entry point.
+
+    Never a ``python -m cheaphelp`` fallback.
     """
     units = systemd.render_units(home=tmp_path, interval="10m")
     assert "ExecStart=cheaphelp run" in units.service
