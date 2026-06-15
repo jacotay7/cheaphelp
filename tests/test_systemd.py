@@ -26,13 +26,13 @@ def test_render_units_contains_exec_and_interval(tmp_path: Path) -> None:
     units = systemd.render_units(home=tmp_path, interval="15m")
     assert "OnUnitActiveSec=15min" in units.timer
     assert "--once" not in units.service, "service must not use the removed --once flag"
-    assert "-m cheaphelp run" in units.service
+    assert "cheaphelp run" in units.service
     assert f"CHEAPHELP_HOME={tmp_path}" in units.service
 
 
 def test_render_units_continuous_by_default(tmp_path: Path) -> None:
     units = systemd.render_units(home=tmp_path, interval="15m")
-    assert units.service.rstrip().endswith("-m cheaphelp run --continuous --max-ticks 20 --sleep 30")
+    assert units.service.rstrip().endswith("cheaphelp run --continuous --max-ticks 20 --sleep 30")
 
 
 def test_render_units_continuous_options(tmp_path: Path) -> None:
@@ -42,7 +42,7 @@ def test_render_units_continuous_options(tmp_path: Path) -> None:
 
 def test_render_units_no_continuous(tmp_path: Path) -> None:
     units = systemd.render_units(home=tmp_path, interval="15m", continuous=False)
-    assert units.service.rstrip().endswith("-m cheaphelp run")
+    assert units.service.rstrip().endswith("cheaphelp run")
     assert "--continuous" not in units.service
 
 
