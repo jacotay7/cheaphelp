@@ -13,7 +13,7 @@ requires-python = ">=3.10"
 keywords = []
 dynamic = ["version"]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "Programming Language :: Python",
     "Programming Language :: Python :: 3",
@@ -38,9 +38,6 @@ Documentation = "https://jacotay7.github.io/cheaphelp"
 Changelog = "https://jacotay7.github.io/cheaphelp/changelog"
 Repository = "https://github.com/jacotay7/cheaphelp"
 Issues = "https://github.com/jacotay7/cheaphelp/issues"
-Discussions = "https://github.com/jacotay7/cheaphelp/discussions"
-Gitter = "https://gitter.im/cheaphelp/community"
-Funding = "https://github.com/sponsors/jacotay7"
 
 [project.scripts]
 cheaphelp = "cheaphelp:main"
