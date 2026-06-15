@@ -46,6 +46,17 @@ def test_render_units_no_continuous(tmp_path: Path) -> None:
     assert "--continuous" not in units.service
 
 
+def test_render_units_uses_bare_entry_point(tmp_path: Path) -> None:
+    """Regression: service units must use the bare ``cheaphelp`` entry point,
+    never a ``python -m cheaphelp`` fallback.
+    """
+    units = systemd.render_units(home=tmp_path, interval="10m")
+    assert "ExecStart=cheaphelp run" in units.service
+    assert "-m cheaphelp" not in units.service
+    assert "sys.executable" not in units.service
+    assert "/usr/bin/python" not in units.service
+
+
 # --- check_health -----------------------------------------------------------
 
 
