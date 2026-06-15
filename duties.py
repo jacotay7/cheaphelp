@@ -67,7 +67,7 @@ def check_quality(ctx: Context) -> None:
 def check_docs(ctx: Context) -> None:
     """Check if the documentation builds correctly."""
     ctx.run(
-        tools.zensical.build(strict=True),
+        tools.zensical.build(strict=True, clean=True),
         title=pyprefix("Building documentation"),
     )
 

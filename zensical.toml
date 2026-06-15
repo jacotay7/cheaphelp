@@ -184,5 +184,6 @@ show_source = true
 show_symbol_type_heading = true
 show_symbol_type_toc = true
 signature_crossrefs = true
+members = true
 summary = true
 unwrap_annotated = true
