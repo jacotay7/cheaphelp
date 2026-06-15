@@ -17,6 +17,7 @@ dispatches by label:
 :ready / :needs-replan                  -> planner    issues.md -> tasks,      label :planned
 :planned, tasks pending                 -> worker     implement one task on the issue branch
 :planned, all tasks done                -> quality gate -> reviewer  open PR (label :in-review) or replan
+                                           (gate fails -> fixer repairs + re-runs gate before replanning)
 :in-review                              -> rework     address new PR review feedback, or no-op
 :needs-human, human replied             -> responder  re-engage a stuck issue
 :needs-human, no new reply / :rejected  -> (idle)
@@ -74,9 +75,9 @@ All product code is under `src/cheaphelp/_internal/`:
 | `conventions.py` | reads `CHEAPHELP.md`/`AGENTS.md`/`CONTRIBUTING.md` into agent context |
 | `pr_state.py` | persists PR <-> issue link state for the rework stage |
 | `opencode.py` | generate `opencode.json`, run agents headlessly, parse decisions |
-| `templates/*.md` | bundled agent prompts (responder/planner/worker/reviewer/rework) |
+| `templates/*.md` | bundled agent prompts (responder/planner/worker/reviewer/rework/fixer) |
 | `tasks.py` | task manifest + per-issue task-state store |
-| `responder.py` / `planner.py` / `worker.py` / `reviewer.py` / `rework.py` | per-role turn logic |
+| `responder.py` / `planner.py` / `worker.py` / `reviewer.py` / `rework.py` / `fixer.py` | per-role turn logic |
 | `orchestrator.py` | one tick of the state machine (`tick()`, `classify()`, stage dispatch) |
 | `cleanup.py` | prune build clones for closed issues / unregistered repos (keeps state) |
 | `systemd.py` | user service + timer install (continuous-mode by default) |

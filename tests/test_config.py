@@ -76,6 +76,23 @@ def test_max_task_attempts_default_and_roundtrip() -> None:
     assert Config.from_dict(cfg.to_dict()).max_task_attempts == 4
 
 
+def test_quality_gate_fix_attempts_default_and_roundtrip() -> None:
+    # Defaults to one fixer attempt before replanning.
+    assert Config().quality_gate_fix_attempts == 1
+    assert Config.from_dict({}).quality_gate_fix_attempts == 1
+    cfg = Config.from_dict({"quality_gate_fix_attempts": 3})
+    assert cfg.quality_gate_fix_attempts == 3
+    assert Config.from_dict(cfg.to_dict()).quality_gate_fix_attempts == 3
+    # 0 disables the fixer.
+    assert Config.from_dict({"quality_gate_fix_attempts": 0}).quality_gate_fix_attempts == 0
+
+
+def test_fixer_role_has_model_and_variant_defaults() -> None:
+    cfg = Config()
+    assert cfg.model_for("fixer") == cfg.model_for("worker")  # cheap tier
+    assert cfg.variant_for("fixer") == "max"
+
+
 def test_prune_work_clones_default_and_roundtrip() -> None:
     assert Config().prune_work_clones is True
     assert Config.from_dict({}).prune_work_clones is True

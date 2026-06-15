@@ -161,7 +161,7 @@ def _format_cost_table(issue_dir: Path) -> str:
     role_counts = store.load_role_counts()
 
     # Same ordering convention as commands._format_cost_lines.
-    role_order = ["responder", "planner", "worker", "reviewer"]
+    role_order = ["responder", "planner", "worker", "fixer", "reviewer"]
     seen: set[str] = set()
     parts: list[str] = []
 

@@ -68,7 +68,7 @@ def _format_cost_lines(report: object) -> list[str]:
         for number in sorted(issue_costs):
             by_role = issue_costs[number]
             # Compute issue_total and breakdown_str.
-            role_order = ["responder", "planner", "worker", "reviewer"]
+            role_order = ["responder", "planner", "worker", "fixer", "reviewer"]
             seen: set[str] = set()
             parts: list[str] = []
             issue_total = UsageData()
@@ -843,12 +843,13 @@ _CONFIG_SCALAR_KEYS: dict[str, type] = {
     "max_issues_per_tick": int,
     "max_tasks_per_tick": int,
     "max_task_attempts": int,
+    "quality_gate_fix_attempts": int,
     "prune_work_clones": bool,
 }
 
 _CONFIG_DICT_KEYS: dict[str, dict[str, type]] = {
-    "models": {"responder": str, "planner": str, "worker": str, "reviewer": str},
-    "variants": {"responder": str, "planner": str, "worker": str, "reviewer": str},
+    "models": {"responder": str, "planner": str, "worker": str, "fixer": str, "reviewer": str},
+    "variants": {"responder": str, "planner": str, "worker": str, "fixer": str, "reviewer": str},
 }
 
 _OPENSCODE_AFFECTED: set[str] = {"models", "variants"}
