@@ -623,7 +623,7 @@ def test_run_agent_populates_usage(
 
 
 # --- run_agent unparseable log via mock ------------------------------------
-@pytest.mark.parametrize("role", ["worker", "planner", "responder", "reviewer", "rework"])
+@pytest.mark.parametrize("role", ["worker", "planner", "responder", "reviewer", "rework", "fixer"])
 def test_run_agent_writes_unparsed_log_via_mock(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -675,10 +675,11 @@ def test_run_agent_truncates_unparsed_log_via_mock(
 def test_build_opencode_config_shape() -> None:
     doc = opencode.build_opencode_config(Config())
     assert doc["$schema"] == opencode.OPENCODE_SCHEMA
-    assert set(doc["agent"]) == {"responder", "planner", "worker", "reviewer", "rework"}
-    # Responder is read-only; worker can write.
+    assert set(doc["agent"]) == {"responder", "planner", "worker", "reviewer", "rework", "fixer"}
+    # Responder is read-only; worker and fixer can write.
     assert doc["agent"]["responder"]["tools"]["edit"] is False
     assert doc["agent"]["worker"]["tools"]["edit"] is True
+    assert doc["agent"]["fixer"]["tools"]["edit"] is True
     # OpenRouter provider lists models without the opencode prefix.
     assert "deepseek/deepseek-v4-flash" in doc["provider"]["openrouter"]["models"]
     assert "minimax/minimax-m3" in doc["provider"]["openrouter"]["models"]

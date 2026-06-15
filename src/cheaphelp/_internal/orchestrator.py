@@ -28,7 +28,7 @@ import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from cheaphelp._internal import cleanup, gitutil, opencode, planner, responder, reviewer, rework, worker
+from cheaphelp._internal import cleanup, fixer, gitutil, opencode, planner, responder, reviewer, rework, worker
 from cheaphelp._internal.config import BUDGET_WARN_SECONDARY, Config, Workspace
 from cheaphelp._internal.conventions import read_conventions
 from cheaphelp._internal.env import GITHUB_TOKEN_KEY, OPENROUTER_API_KEY, load_into_environ
@@ -312,33 +312,19 @@ def _run_planner(gh, workspace, config, repo, issue, cwd, log, report, tracker=N
         report.actions.append(f"#{issue.number}: planned {res.task_count} task(s)")
 
 
-def _quality_gate(gh, workspace, config, repo, number, work_dir, log, report) -> bool:  # noqa: ANN001
-    """Run the repo's check command in the clone. On failure, loop back to planner.
-
-    Returns True if checks passed (proceed to the reviewer), False otherwise.
-    """
-    # Cheap path first: auto-fix trivial issues (formatting, import order,
-    # lint --fix) and commit them, so they never trigger an expensive replan.
-    if repo.autofix:
-        log(f"  · {repo.slug}#{number}: auto-fixing ({repo.autofix})")
-        try:
-            gitutil.run_command(work_dir, repo.autofix)
-        except Exception as exc:  # noqa: BLE001
-            log(f"  · {repo.slug}#{number}: auto-fix command errored: {exc}")
-        if gitutil.commit_all(work_dir, message="cheaphelp: auto-fix (format/lint)"):
-            log(f"  > {repo.slug}#{number}: auto-fix made changes, committed")
-
-    log(f"  · {repo.slug}#{number}: running quality gate ({repo.checks})")
+def _run_checks(work_dir, repo) -> tuple[int, str]:  # noqa: ANN001
+    """Run the repo's quality-gate command, returning ``(returncode, output)``."""
     try:
-        rc, output = gitutil.run_command(work_dir, repo.checks)
+        return gitutil.run_command(work_dir, repo.checks)
     except Exception as exc:  # noqa: BLE001
-        rc, output = 1, f"quality gate could not run: {exc}"
-    if rc == 0:
-        log(f"  > {repo.slug}#{number}: quality gate passed")
-        return True
+        return 1, f"quality gate could not run: {exc}"
 
+
+def _gate_to_replan(gh, workspace, config, repo, number, rc, output, log, report) -> bool:  # noqa: ANN001
+    """Send a failed quality gate back to the planner. Always returns False."""
     tail = output[-4000:]
     issue_dir = workspace.issue_dir(repo.owner, repo.name, number)
+    issue_dir.mkdir(parents=True, exist_ok=True)
     (issue_dir / "replan.md").write_text(
         f"The automated quality checks failed (exit {rc}). The implementation must "
         f"be corrected before it can be reviewed. Command:\n\n    {repo.checks}\n\n"
@@ -368,6 +354,58 @@ def _quality_gate(gh, workspace, config, repo, number, work_dir, log, report) ->
     log(f"  ! {repo.slug}#{number}: quality gate FAILED -> needs-replan")
     report.actions.append(f"#{number}: quality gate failed")
     return False
+
+
+def _quality_gate(gh, workspace, config, repo, issue, work_dir, log, report, *, token=None, tracker=None) -> bool:  # noqa: ANN001
+    """Run the repo's check command in the clone, repairing failures before replan.
+
+    On a clean pass, returns True (proceed to the reviewer). On failure, runs up
+    to ``config.quality_gate_fix_attempts`` ``fixer`` turns — each re-running the
+    gate — to repair the working tree cheaply instead of an expensive replan. If
+    the gate still fails, loops the issue back to the planner and returns False.
+    """
+    number = issue.number
+    # Cheap path first: auto-fix trivial issues (formatting, import order,
+    # lint --fix) and commit them, so they never trigger an expensive replan.
+    if repo.autofix:
+        log(f"  · {repo.slug}#{number}: auto-fixing ({repo.autofix})")
+        try:
+            gitutil.run_command(work_dir, repo.autofix)
+        except Exception as exc:  # noqa: BLE001
+            log(f"  · {repo.slug}#{number}: auto-fix command errored: {exc}")
+        if gitutil.commit_all(work_dir, message="cheaphelp: auto-fix (format/lint)"):
+            log(f"  > {repo.slug}#{number}: auto-fix made changes, committed")
+
+    log(f"  · {repo.slug}#{number}: running quality gate ({repo.checks})")
+    rc, output = _run_checks(work_dir, repo)
+    if rc == 0:
+        log(f"  > {repo.slug}#{number}: quality gate passed")
+        return True
+
+    # Quality gate failed: try to repair it with a worker before replanning.
+    attempts = config.quality_gate_fix_attempts
+    for attempt in range(1, attempts + 1):
+        # The fixer is an agent call; respect the daily budget.
+        if not _check_budget(tracker, config, gh, repo, issue, log, report):
+            break
+        log(f"  · {repo.slug}#{number}: quality gate failed; running fixer (attempt {attempt}/{attempts})…")
+        res = fixer.run_fix(workspace, config, repo, number, output, work_dir, token=token)
+        _record_cost(workspace, repo, number, "fixer", res.usage, report, tracker)
+        report.turns_taken += 1
+        flag = " +commit" if res.committed else ""
+        log(f"  > {repo.slug}#{number}: fixer -> {res.status}{flag}")
+        report.actions.append(f"#{number}: fixer {res.status}")
+        if not res.committed:
+            # No changes were made; re-running the gate would fail identically.
+            log(f"  · {repo.slug}#{number}: fixer made no changes; sending back to planning")
+            break
+        rc, output = _run_checks(work_dir, repo)
+        if rc == 0:
+            log(f"  > {repo.slug}#{number}: quality gate passed after fix")
+            report.actions.append(f"#{number}: quality gate passed after fix")
+            return True
+
+    return _gate_to_replan(gh, workspace, config, repo, number, rc, output, log, report)
 
 
 def _check_blast_radius(gh, workspace, config, repo, number, work_dir, log, report) -> bool:  # noqa: ANN001, ARG001
@@ -482,8 +520,20 @@ def _run_build(gh, workspace, config, repo, issue, token, log, report, tracker=N
 
     tasks = store.load()
     if store.all_done(tasks):
-        # Quality gate: a failing check never becomes a PR — loop back to planning.
-        if repo.checks and not _quality_gate(gh, workspace, config, repo, number, work_dir, log, report):
+        # Quality gate: a failing check never becomes a PR. The gate first tries
+        # to repair the failure with a fixer turn, then loops back to planning.
+        if repo.checks and not _quality_gate(
+            gh,
+            workspace,
+            config,
+            repo,
+            issue,
+            work_dir,
+            log,
+            report,
+            token=token,
+            tracker=tracker,
+        ):
             return
         # Blast-radius guardrail: skip the reviewer (and its LLM call) when the
         # diff is too large to open as a PR. Routes the issue to needs-human

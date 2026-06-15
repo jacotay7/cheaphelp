@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from cheaphelp._internal import (
+    fixer,
     gitutil,
     opencode,
     orchestrator,
@@ -25,6 +26,7 @@ from cheaphelp._internal.responder import (
 )
 from cheaphelp._internal.spend import DailySpendTracker
 from cheaphelp._internal.tasks import DONE, IssueCostStore, TaskStore
+from tests.conftest import FakeGitHubClient
 
 
 class _FakeGitHub:
@@ -346,6 +348,150 @@ def test_run_build_caps_tasks_per_tick(
     assert calls == ["t1", "t2"]
     assert not store.all_done()
     assert store.next_ready() is not None
+
+
+def _gate_repo() -> RepoEntry:
+    return RepoEntry(owner="octocat", name="hello", checks="pytest")
+
+
+def _gate_issue() -> Issue:
+    return Issue(number=1, title="t", body="b", state="open", labels=[], user="u", html_url="")
+
+
+def test_quality_gate_passes_without_fixer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    repo, issue = _gate_repo(), _gate_issue()
+
+    monkeypatch.setattr(orchestrator, "_run_checks", lambda *_a, **_k: (0, "ok"))
+    called: list[int] = []
+    monkeypatch.setattr(fixer, "run_fix", lambda *_a, **_k: called.append(1))
+
+    report = orchestrator.RepoReport(slug=repo.slug)
+    ok = orchestrator._quality_gate(
+        FakeGitHubClient(),
+        ws,
+        Config(),
+        repo,
+        issue,
+        tmp_path,
+        lambda _m: None,
+        report,
+        token="t",
+    )
+
+    assert ok is True
+    assert called == []  # gate passed; fixer never runs
+
+
+def test_quality_gate_fixer_repairs_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    repo, issue = _gate_repo(), _gate_issue()
+
+    # First gate run fails; after the fixer commits, the re-run passes.
+    results = iter([(1, "boom"), (0, "ok")])
+    monkeypatch.setattr(orchestrator, "_run_checks", lambda *_a, **_k: next(results))
+    monkeypatch.setattr(
+        fixer,
+        "run_fix",
+        lambda *_a, **_k: fixer.FixResult(status="done", committed=True),
+    )
+
+    gh = FakeGitHubClient()
+    report = orchestrator.RepoReport(slug=repo.slug)
+    ok = orchestrator._quality_gate(gh, ws, Config(), repo, issue, tmp_path, lambda _m: None, report, token="t")
+
+    assert ok is True
+    assert any("quality gate passed after fix" in a for a in report.actions)
+    assert report.turns_taken == 1
+    # No replan label was applied.
+    assert not any(call[0] == "add_labels" for call in gh.calls)
+
+
+def test_quality_gate_fixer_fails_then_replan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    repo, issue = _gate_repo(), _gate_issue()
+
+    monkeypatch.setattr(orchestrator, "_run_checks", lambda *_a, **_k: (1, "still broken"))
+    monkeypatch.setattr(
+        fixer,
+        "run_fix",
+        lambda *_a, **_k: fixer.FixResult(status="done", committed=True),
+    )
+
+    gh = FakeGitHubClient()
+    report = orchestrator.RepoReport(slug=repo.slug)
+    ok = orchestrator._quality_gate(gh, ws, Config(), repo, issue, tmp_path, lambda _m: None, report, token="t")
+
+    assert ok is False
+    assert any("quality gate failed" in a for a in report.actions)
+    # Replan label applied and replan.md written.
+    labels_added = [c[1][3] for c in gh.calls if c[0] == "add_labels"]
+    assert [Config().labels["needs_replan"]] in labels_added
+    assert (ws.issue_dir(repo.owner, repo.name, 1) / "replan.md").exists()
+
+
+def test_quality_gate_no_commit_skips_rerun(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    repo, issue = _gate_repo(), _gate_issue()
+
+    # The gate is checked exactly once: the fixer makes no changes, so we don't
+    # waste a second gate run before replanning.
+    checks_calls: list[int] = []
+
+    def fake_checks(*_a: object, **_k: object) -> tuple[int, str]:
+        checks_calls.append(1)
+        return 1, "boom"
+
+    monkeypatch.setattr(orchestrator, "_run_checks", fake_checks)
+    monkeypatch.setattr(
+        fixer,
+        "run_fix",
+        lambda *_a, **_k: fixer.FixResult(status="blocked", committed=False),
+    )
+
+    gh = FakeGitHubClient()
+    report = orchestrator.RepoReport(slug=repo.slug)
+    ok = orchestrator._quality_gate(gh, ws, Config(), repo, issue, tmp_path, lambda _m: None, report, token="t")
+
+    assert ok is False
+    assert len(checks_calls) == 1
+
+
+def test_quality_gate_fix_attempts_zero_disables_fixer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    repo, issue = _gate_repo(), _gate_issue()
+
+    monkeypatch.setattr(orchestrator, "_run_checks", lambda *_a, **_k: (1, "boom"))
+    called: list[int] = []
+    monkeypatch.setattr(fixer, "run_fix", lambda *_a, **_k: called.append(1))
+
+    cfg = Config.from_dict({"quality_gate_fix_attempts": 0})
+    gh = FakeGitHubClient()
+    report = orchestrator.RepoReport(slug=repo.slug)
+    ok = orchestrator._quality_gate(gh, ws, cfg, repo, issue, tmp_path, lambda _m: None, report, token="t")
+
+    assert ok is False
+    assert called == []  # fixer disabled
 
 
 def test_variant_for() -> None:
