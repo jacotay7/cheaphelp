@@ -97,11 +97,21 @@ def _format_cost_lines(report: object) -> list[str]:
     return lines
 
 
-def _format_budget_line(report: object) -> list[str]:
-    """One-line budget summary for the tick, or [] when unlimited/no spend."""
-    cap = float(getattr(report, "daily_budget", 0.0))
-    spend = float(getattr(report, "daily_spend", 0.0))
-    exhausted = bool(getattr(report, "budget_exhausted", False))
+def _format_budget_line(cap: float, spend: float, exhausted: bool) -> list[str]:
+    """One-line budget summary for the tick, or [] when unlimited/no spend.
+
+    Parameters:
+        cap: The daily budget cap in USD. A value <= 0.0 means unlimited and
+            results in an empty list (nothing to print) when *exhausted* is also
+            ``False``.
+        spend: The cumulative spend today in USD.
+        exhausted: ``True`` when the cap has been reached or exceeded.
+
+    Returns:
+        A list containing the single budget line (to be printed line by line by
+        the caller's for-loop), or ``[]`` when the cap is disabled (<= 0.0) and
+        not exhausted — the caller should print nothing.
+    """
     if cap <= 0.0 and not exhausted:
         return []
     if exhausted:
@@ -375,7 +385,11 @@ def cmd_run(args: argparse.Namespace) -> int:
 
             for cost_line in _format_cost_lines(report):
                 log(cost_line)
-            for budget_line in _format_budget_line(report):
+            for budget_line in _format_budget_line(
+                cap=float(getattr(report, "daily_budget", 0.0)),
+                spend=float(getattr(report, "daily_spend", 0.0)),
+                exhausted=bool(getattr(report, "budget_exhausted", False)),
+            ):
                 log(budget_line)
 
             if getattr(report, "budget_exhausted", False):
