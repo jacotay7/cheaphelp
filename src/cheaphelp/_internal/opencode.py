@@ -535,6 +535,12 @@ def run_agent(
             for offline diagnosis.
 
     If `CHEAPHELP_AGENT_MOCK` is set, no subprocess runs; the mock is returned.
+
+    Retries with exponential backoff on timeout, non-zero exit, and clean exit
+    without a parseable decision block, up to ``retry_attempts`` attempts (per
+    config).  On the **final** attempt only, the prompt is appended with the
+    format reminder (``_REPROMPT_SUFFIX``) to give the model one last hint
+    before the output is declared unparseable.
     """
     mock = _mock_result()
     if mock is not None:
@@ -590,8 +596,10 @@ def run_agent(
 
     max_attempts = max(1, config.retry_attempts)
     for attempt in range(1, max_attempts + 1):
+        is_last = attempt >= max_attempts
+        current_prompt = f"{prompt}\n\n{_REPROMPT_SUFFIX}" if is_last else prompt
         try:
-            result = _invoke(prompt)
+            result = _invoke(current_prompt)
         except subprocess.TimeoutExpired:
             if attempt >= max_attempts:
                 raise
@@ -625,10 +633,23 @@ def run_agent(
         # Clean exit.
         if result.decision is not None:
             return result
-        # Clean exit, no parseable decision: the existing single re-prompt
-        # for a format issue (NOT a transient retry).
-        reprompt_result = _invoke(f"{prompt}\n\n{_REPROMPT_SUFFIX}")
-        _save_unparsed_output(issue_dir, role, reprompt_result)
-        return reprompt_result
+
+        # Clean exit, no parseable decision: treat as a transient failure and
+        # retry with backoff. The format reminder was already sent on the last
+        # attempt via `current_prompt`; if we still got nothing back, return the
+        # result as-is so the caller sees the unparseable output.
+        if is_last:
+            _save_unparsed_output(issue_dir, role, result)
+            return result
+        delay = _compute_backoff(attempt, config.retry_base_delay)
+        _LOG.warning(
+            "agent %s: attempt %d/%d produced no parseable decision, retrying in %.1fs",
+            role,
+            attempt,
+            max_attempts,
+            delay,
+        )
+        time.sleep(delay)
+        continue
 
     raise RuntimeError("retry loop exited without return")  # pragma: no cover
