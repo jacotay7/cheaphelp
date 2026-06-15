@@ -409,14 +409,16 @@ def cmd_systemd_install(args: argparse.Namespace) -> int:
             continuous=args.continuous,
             max_ticks=args.max_ticks,
             sleep=args.sleep,
+            linger=getattr(args, "linger", False),
         )
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 2
     for action in actions:
         print(f"  {action}")
-    print("\nTip: for the timer to run when you are logged out:")
-    print("  loginctl enable-linger $USER")
+    if not getattr(args, "linger", False):
+        print("\nTip: for the timer to run when you are logged out:")
+        print("  loginctl enable-linger $USER")
     return 0
 
 
