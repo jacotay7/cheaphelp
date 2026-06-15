@@ -454,10 +454,16 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     ws = _workspace(args)
     ok = True
 
-    def check(label: str, passed: bool, detail: str = "") -> None:
+    def check(label: str, passed: bool, detail: str = "", *, state: str | None = None) -> None:
         nonlocal ok
-        mark = "OK " if passed else "FAIL"
-        ok = ok and passed
+        if state == "skip":
+            mark = "-- "
+        elif passed:
+            mark = "OK "
+        else:
+            mark = "FAIL"
+        if state != "skip":
+            ok = ok and passed
         print(f"  [{mark}] {label}{(' - ' + detail) if detail else ''}")
 
     print(f"Workspace: {ws.home}")
@@ -486,6 +492,23 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
     repos = Registry(ws.registry_path).load()
     check("repositories registered", bool(repos), f"{len(repos)} registered")
+
+    health = systemd.check_health()
+    if health.available is False:
+        pass  # no systemctl — skip line entirely
+    elif not health.installed:
+        check("systemd timer: not installed", True, state="skip")
+    elif health.enabled and health.active and health.last_exit_code == 0:
+        check("systemd timer: cheaphelp.timer (enabled, active)", True)
+    elif not health.enabled:
+        check("systemd timer: cheaphelp.timer (not enabled)", False)
+    elif not health.active:
+        check("systemd timer: cheaphelp.timer (not active)", False)
+    else:
+        reason = (
+            f"last run failed: exit {health.last_exit_code}" if health.last_exit_code is not None else "last run failed"
+        )
+        check(f"systemd timer: cheaphelp.timer ({reason})", False)
 
     print("\nModels:")
     for role, model in config.models.items():
