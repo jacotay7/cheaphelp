@@ -247,7 +247,10 @@ def _run_responder(gh, workspace, config, repo, issue, comments, cwd, log, repor
         return
     prompt = responder.build_prompt(issue, comments, conventions=read_conventions(cwd))
     log(f"  · {repo.slug}#{issue.number}: running responder ({config.model_for('responder')})…")
-    result = opencode.run_agent(workspace, config, "responder", prompt, cwd=cwd, timeout=config.agent_timeout)
+    issue_dir = workspace.issue_dir(repo.owner, repo.name, issue.number)
+    result = opencode.run_agent(
+        workspace, config, "responder", prompt, cwd=cwd, timeout=config.agent_timeout, issue_dir=issue_dir
+    )
     _record_cost(workspace, repo, issue.number, "responder", result.usage, report, tracker)
     if result.decision is None:
         log(f"  ! {repo.slug}#{issue.number}: responder produced no decision (rc={result.returncode})")
@@ -279,7 +282,9 @@ def _run_planner(gh, workspace, config, repo, issue, cwd, log, report, tracker=N
         conventions=read_conventions(cwd),
     )
     log(f"  · {repo.slug}#{issue.number}: running planner ({config.model_for('planner')})…")
-    result = opencode.run_agent(workspace, config, "planner", prompt, cwd=cwd, timeout=config.agent_timeout)
+    result = opencode.run_agent(
+        workspace, config, "planner", prompt, cwd=cwd, timeout=config.agent_timeout, issue_dir=issue_dir
+    )
     _record_cost(workspace, repo, issue.number, "planner", result.usage, report, tracker)
     if result.decision is None:
         log(f"  ! {repo.slug}#{issue.number}: planner produced no decision (rc={result.returncode})")

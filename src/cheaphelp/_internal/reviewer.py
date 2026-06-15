@@ -256,7 +256,9 @@ def review_issue(
     conventions = read_conventions(clone_dir)
     prompt = build_prompt(issue_md, name_status, full_diff, _collect_summaries(store), conventions=conventions)
 
-    result = opencode.run_agent(workspace, config, "reviewer", prompt, cwd=clone_dir, timeout=config.agent_timeout)
+    result = opencode.run_agent(
+        workspace, config, "reviewer", prompt, cwd=clone_dir, timeout=config.agent_timeout, issue_dir=issue_dir
+    )
     usage = result.usage
     if result.decision is None:
         return ReviewResult(number=number, decision="none", error="unparseable", usage=usage)

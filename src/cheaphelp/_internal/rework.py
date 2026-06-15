@@ -265,7 +265,9 @@ def _run_rework(
     prompt = build_prompt(issue_md, name_status, full_diff, feedback_blocks)
 
     try:
-        result = opencode.run_agent(workspace, config, "rework", prompt, cwd=work_dir, timeout=config.agent_timeout)
+        result = opencode.run_agent(
+            workspace, config, "rework", prompt, cwd=work_dir, timeout=config.agent_timeout, issue_dir=issue_dir
+        )
     except subprocess.TimeoutExpired:
         new_attempts = rework_attempts + 1
         pr_state.save_pr_state(issue_dir, {**pr_state_data, "rework_attempts": new_attempts, "last_error": "timeout"})
