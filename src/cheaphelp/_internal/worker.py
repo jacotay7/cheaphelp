@@ -86,8 +86,9 @@ def run_task(
     token: str | None,
 ) -> WorkResult:
     """Run one task end-to-end: agent edits, parse result, commit, record state."""
-    store = TaskStore(workspace.issue_dir(repo.owner, repo.name, number))
-    issue_md_path = workspace.issue_dir(repo.owner, repo.name, number) / "issues.md"
+    issue_dir = workspace.issue_dir(repo.owner, repo.name, number)
+    store = TaskStore(issue_dir)
+    issue_md_path = issue_dir / "issues.md"
     issue_md = issue_md_path.read_text(encoding="utf-8") if issue_md_path.exists() else ""
 
     store.set_status(task.id, "in_progress")
@@ -95,7 +96,15 @@ def run_task(
     prompt = build_prompt(task, issue_md, conventions=conventions)
     usage: UsageData | None = None
     try:
-        result = opencode.run_agent(workspace, config, "worker", prompt, cwd=clone_dir, timeout=config.agent_timeout)
+        result = opencode.run_agent(
+            workspace,
+            config,
+            "worker",
+            prompt,
+            cwd=clone_dir,
+            timeout=config.agent_timeout,
+            issue_dir=issue_dir,
+        )
         usage = result.usage
     except subprocess.TimeoutExpired:
         # A timeout is retryable: reset to pending and let the next tick try
@@ -114,7 +123,11 @@ def run_task(
 
     if result.decision is None:
         # No parseable decision: leave whatever changes exist but mark blocked.
-        store.set_status(task.id, BLOCKED, summary="Worker produced no parseable result.")
+        store.set_status(
+            task.id,
+            BLOCKED,
+            summary="Worker produced no parseable result (see `last_unparsed_worker.log`).",
+        )
         return WorkResult(task_id=task.id, status=BLOCKED, error="unparseable")
 
     full_summary = summary + (f"\n\n**Notes:** {notes}" if notes else "")
