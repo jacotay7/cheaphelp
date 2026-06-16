@@ -237,7 +237,13 @@ class _FakeGH:
         return list(self.comments.get((f"{owner}/{name}", number), []))
 
     def ensure_label(
-        self, owner: str, repo: str, name: str, *, color: str = "ededed", description: str = ""
+        self,
+        owner: str,
+        repo: str,
+        name: str,
+        *,
+        color: str = "ededed",
+        description: str = "",
     ) -> None: ...
 
 

@@ -87,6 +87,14 @@ def test_worker_build_prompt_is_task_scoped_without_full_gate() -> None:
     assert "Quality gate" not in prompt
 
 
+def test_worker_prompt_mentions_docstrings() -> None:
+    """The worker prompt reminds the worker to write meaningful docstrings."""
+    from cheaphelp._internal.templates import load_prompt  # noqa: PLC0415
+
+    prompt = load_prompt("worker")
+    assert "docstring" in prompt.lower()
+
+
 def test_run_build_blast_radius_prevents_reviewer(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
