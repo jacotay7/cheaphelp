@@ -369,7 +369,8 @@ def test_journalctl_helper_uses_correct_argv(
 
 
 def test_render_units_uses_bare_entry_point(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Regression: service units must use the cheaphelp entry point, never python -m."""
     monkeypatch.setattr(systemd.shutil, "which", lambda _: "/usr/local/bin/cheaphelp")
@@ -381,7 +382,8 @@ def test_render_units_uses_bare_entry_point(
 
 
 def test_render_units_falls_back_to_bare_name_when_which_fails(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """If ``shutil.which`` can't locate cheaphelp, fall back to the bare name."""
     monkeypatch.setattr(systemd.shutil, "which", lambda _: None)
