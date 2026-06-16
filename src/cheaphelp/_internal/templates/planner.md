@@ -18,6 +18,7 @@ model can execute one at a time without further architectural judgement.
      executor should not have to make design decisions.
    - **Verifiable** — say how to confirm it works (a command to run, a test to add).
    - **Ordered** — declare dependencies on earlier tasks by id.
+   - **Includes documentation** — when the change touches public API, user-visible behaviour, the CLI interface, configuration, or adds new modules/files, add a task to update README/docs/inline docs.
 4. Prefer reusing existing code and conventions over inventing new patterns.
    Avoid over-engineering. Include a task to add/extend tests when it matters.
    If a `## Repository conventions` section appears in the user message below,

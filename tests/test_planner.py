@@ -128,6 +128,14 @@ def test_merge_tasks_renames_id_collision() -> None:
     assert merged[1].title == "corrective"
 
 
+def test_planner_prompt_mentions_documentation() -> None:
+    """Locks in the documentation-task guidance added to the planner prompt."""
+    from cheaphelp._internal.templates import load_prompt  # noqa: PLC0415
+
+    prompt = load_prompt("planner")
+    assert "documentation" in prompt.lower()
+
+
 def test_run_planner_forwards_conventions(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
