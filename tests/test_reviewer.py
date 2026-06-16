@@ -18,7 +18,14 @@ from cheaphelp._internal.config import Config, Workspace
 from cheaphelp._internal.opencode import UsageData
 from cheaphelp._internal.registry import RepoEntry
 from cheaphelp._internal.tasks import DONE, IssueCostStore, TaskStore
+from cheaphelp._internal.templates import load_prompt
 from tests.conftest import FakeGitHubClient
+
+
+def test_reviewer_prompt_mentions_documentation() -> None:
+    """The reviewer prompt includes a documentation check in its checklist."""
+    prompt = load_prompt("reviewer")
+    assert "Documentation:**" in prompt
 
 
 def test_reviewer_review_issue_forwards_conventions(

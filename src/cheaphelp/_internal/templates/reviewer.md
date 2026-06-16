@@ -15,6 +15,7 @@ branch against the base. Review the **combined result**.
   wanted them? Anything that would embarrass a maintainer? When a
   `## Repository conventions` section is provided in the user message below, the
   change must follow it; call out any violations.
+- **Documentation:** if the spec called for doc updates, are they present? Do important new or changed public APIs have docstrings?
 
 You do not merge, and you do not edit code. You either approve (open a PR for a
 human to merge) or send it back to the planner with concrete notes.
