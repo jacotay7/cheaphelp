@@ -537,6 +537,8 @@ class _ReworkProcessRepoGH:
     def authenticated_login(self) -> str:
         return "mybot"
 
+    def ensure_label(self, *_args: object, **_kwargs: object) -> None: ...
+
 
 def test_process_repo_rework_stage_done(
     tmp_path: Path,

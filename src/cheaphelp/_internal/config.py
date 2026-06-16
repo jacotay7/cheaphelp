@@ -42,6 +42,7 @@ DEFAULT_MODELS: dict[str, str] = {
 }
 
 DEFAULT_LABELS: dict[str, str] = {
+    "activated": "cheaphelp",  # human opts the issue into the pipeline
     "ready": "cheaphelp:ready",  # responder finalized; planner's input
     "rejected": "cheaphelp:rejected",  # responder declined
     "planned": "cheaphelp:planned",  # planner produced tasks; worker's input
