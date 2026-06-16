@@ -35,6 +35,7 @@ def test_status_happy_path_groups_and_stages(
     reg.add(RepoEntry(owner="octocat", name="bye", enabled=False))
 
     planned_label = Config().labels["planned"]
+    activated_label = Config().labels["activated"]
     fake = _FakeGH("test-token")
     fake.issues["octocat/hello"] = [
         Issue(
@@ -48,10 +49,10 @@ def test_status_happy_path_groups_and_stages(
         ),
         Issue(
             number=2,
-            title="Issue with no labels",
+            title="Issue with activation label (no pipeline labels)",
             body="",
             state="open",
-            labels=[],
+            labels=[activated_label],
             user="alice",
             html_url="",
         ),
@@ -77,7 +78,7 @@ def test_status_happy_path_groups_and_stages(
     planned_line = next(line for line in captured.splitlines() if "Issue with planned label" in line)
     assert "build" in planned_line
 
-    other_line = next(line for line in captured.splitlines() if "Issue with no labels" in line)
+    other_line = next(line for line in captured.splitlines() if "Issue with activation label" in line)
     assert "responder" in other_line
 
 

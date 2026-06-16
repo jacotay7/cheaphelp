@@ -33,8 +33,9 @@ class _FakeGitHub:
     """Minimal stand-in for GitHubClient used by _process_repo tests."""
 
     def __init__(self, issue_count: int) -> None:
+        activated = Config().labels["activated"]
         self._issues = [
-            Issue(number=n, title="t", body="b", state="open", labels=[], user="human", html_url="")
+            Issue(number=n, title="t", body="b", state="open", labels=[activated], user="human", html_url="")
             for n in range(1, issue_count + 1)
         ]
 
@@ -46,6 +47,8 @@ class _FakeGitHub:
 
     def authenticated_login(self) -> str:
         return "mybot"
+
+    def ensure_label(self, *_args: object, **_kwargs: object) -> None: ...
 
 
 class _BuildFakeGH:
@@ -108,6 +111,32 @@ def test_process_repo_caps_work_to_max_issues(
     assert len(report.actions) == 5
 
 
+def test_process_repo_ensures_activation_label(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_process_repo calls ensure_label for the activation label on every tick."""
+    ws = Workspace(tmp_path)
+    ws.ensure()
+    ws.save_config(Config())
+    monkeypatch.setenv("CHEAPHELP_AGENT_MOCK", "/dev/null")
+    repo = RepoEntry(owner="octocat", name="hello")
+    gh = FakeGitHubClient()
+
+    _process_repo(
+        gh,
+        ws,
+        Config(),
+        repo,
+        "token",
+        dry_run=False,
+        log=lambda _m: None,
+    )
+
+    ensure_calls = [c for c in gh.calls if c[0] == "ensure_label"]
+    assert any(c[1][2] == Config().labels["activated"] for c in ensure_calls)
+
+
 def test_process_repo_skips_locked_issue(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -145,9 +174,10 @@ class _AdvancedUnderLockGH:
 
     def __init__(self, ready_label: str) -> None:
         self._ready = ready_label
+        self._activated = Config().labels["activated"]
 
     def list_open_issues(self, _owner: str, _name: str) -> list[Issue]:
-        return [Issue(number=1, title="t", body="b", state="open", labels=[], user="human", html_url="")]
+        return [Issue(number=1, title="t", body="b", state="open", labels=[self._activated], user="human", html_url="")]
 
     def list_issue_comments(self, _owner: str, _name: str, _number: int) -> list[Comment]:
         return []
@@ -157,6 +187,8 @@ class _AdvancedUnderLockGH:
 
     def authenticated_login(self) -> str:
         return "mybot"
+
+    def ensure_label(self, *_args: object, **_kwargs: object) -> None: ...
 
 
 def test_process_repo_reclassifies_under_lock_and_skips_when_advanced(
@@ -193,7 +225,15 @@ class _RecordingResponderGH:
         self.comments: list[tuple[int, str]] = []
 
     def _issue(self) -> Issue:
-        return Issue(number=1, title="t", body="b", state="open", labels=[], user="human", html_url="")
+        return Issue(
+            number=1,
+            title="t",
+            body="b",
+            state="open",
+            labels=[Config().labels["activated"]],
+            user="human",
+            html_url="",
+        )
 
     def list_open_issues(self, _owner: str, _name: str) -> list[Issue]:
         return [self._issue()]
@@ -267,6 +307,8 @@ class _IssuesGH:
 
     def authenticated_login(self) -> str:
         return "mybot"
+
+    def ensure_label(self, *_args: object, **_kwargs: object) -> None: ...
 
 
 def test_process_repo_defers_issue_with_open_dependency(
@@ -528,8 +570,13 @@ def test_classify_stages() -> None:
     cfg = Config()
     lab = cfg.labels
     bot = "bot"
-    # Fresh issue, human opened it -> responder.
-    assert classify(_issue_with([]), [], cfg) == "responder"
+    # Fresh issue with activation label -> responder.
+    assert classify(_issue_with([lab["activated"]]), [], cfg) == "responder"
+    # Fresh issue without the activation label -> idle (human opt-in required).
+    assert classify(_issue_with([]), [], cfg) == "idle"
+    # Same gating applies when the issue is fresh but the last comment is human.
+    human_c = Comment(id=1, body="hi", user="alice", created_at="")
+    assert classify(_issue_with([]), [human_c], cfg) == "idle"
     # Ready / needs-replan -> planner.
     assert classify(_issue_with([lab["ready"]]), [], cfg) == "planner"
     assert classify(_issue_with([lab["needs_replan"]]), [], cfg) == "planner"
@@ -546,6 +593,22 @@ def test_classify_stages() -> None:
     assert classify(_issue_with([]), [bot_c], cfg) == "idle"
     # Terminal labels win over in-progress (precedence: rejected > in-review > needs-human).
     assert classify(_issue_with([lab["in_progress"], lab["in_review"]]), [], cfg) == "rework"
+
+
+def test_classify_activation_label_does_not_block_pipeline_labels() -> None:
+    """Pipeline-labeled issues route normally even without the activation label."""
+    cfg = Config()
+    lab = cfg.labels
+    for pipeline_label, expected in (
+        ("ready", "planner"),
+        ("needs_replan", "planner"),
+        ("planned", "build"),
+        ("in_progress", "build"),
+        ("in_review", "rework"),
+        ("needs_human", "needs-human"),
+        ("rejected", "rejected"),
+    ):
+        assert classify(_issue_with([lab[pipeline_label]]), [], cfg) == expected
 
 
 # --- workspace lock --------------------------------------------------------
@@ -973,6 +1036,8 @@ def test_tick_report_total_cost_sums_across_repos(
         def list_open_issues(self, _owner: str, _name: str) -> list[Issue]:
             return []
 
+        def ensure_label(self, *_args: object, **_kwargs: object) -> None: ...
+
     monkeypatch.setattr(orchestrator, "GitHubClient", lambda *_a, **_k: _NoIssuesGH())
 
     report = orchestrator.tick(ws, log=lambda _m: None)
@@ -993,11 +1058,13 @@ class _BudgetFakeGH:
     """
 
     def __init__(self, issue_count: int = 2) -> None:
+        activated = Config().labels["activated"]
         self._issues = [
-            Issue(number=n, title="t", body="b", state="open", labels=[], user="human", html_url="")
+            Issue(number=n, title="t", body="b", state="open", labels=[activated], user="human", html_url="")
             for n in range(1, issue_count + 1)
         ]
         self.comments: list[tuple[int, str]] = []
+        self._activated = activated
 
     def list_open_issues(self, _owner: str, _name: str) -> list[Issue]:
         return list(self._issues)
@@ -1006,7 +1073,9 @@ class _BudgetFakeGH:
         return []
 
     def get_issue(self, _owner: str, _name: str, number: int) -> Issue:
-        return Issue(number=number, title="t", body="b", state="open", labels=[], user="human", html_url="")
+        return Issue(
+            number=number, title="t", body="b", state="open", labels=[self._activated], user="human", html_url="",
+        )
 
     def create_comment(self, _owner: str, _name: str, number: int, body: str) -> Comment:
         self.comments.append((number, body))
@@ -1014,6 +1083,8 @@ class _BudgetFakeGH:
 
     def authenticated_login(self) -> str:
         return "mybot"
+
+    def ensure_label(self, *_args: object, **_kwargs: object) -> None: ...
 
 
 def test_process_repo_skips_all_issues_when_budget_exhausted(
@@ -1128,6 +1199,8 @@ def test_tick_report_budget_fields_populated(
 
         def list_open_issues(self, _owner: str, _name: str) -> list[Issue]:
             return []
+
+        def ensure_label(self, *_args: object, **_kwargs: object) -> None: ...
 
     monkeypatch.setattr(orchestrator, "GitHubClient", lambda *_a, **_k: _NoIssuesGH())
 

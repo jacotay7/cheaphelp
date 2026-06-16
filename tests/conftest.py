@@ -236,6 +236,8 @@ class _FakeGH:
     def list_issue_comments(self, owner: str, name: str, number: int) -> list[Comment]:
         return list(self.comments.get((f"{owner}/{name}", number), []))
 
+    def ensure_label(self, *_args: object, **_kwargs: object) -> None: ...
+
 
 def _seed_workspace_env(ws: Workspace, *, token: str) -> None:
     """Write a ``GITHUB_TOKEN`` into the workspace ``.env`` file."""
