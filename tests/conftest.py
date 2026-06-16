@@ -236,7 +236,15 @@ class _FakeGH:
     def list_issue_comments(self, owner: str, name: str, number: int) -> list[Comment]:
         return list(self.comments.get((f"{owner}/{name}", number), []))
 
-    def ensure_label(self, owner: str, repo: str, name: str, *, color: str = "ededed", description: str = "") -> None: ...
+    def ensure_label(
+        self,
+        owner: str,
+        repo: str,
+        name: str,
+        *,
+        color: str = "ededed",
+        description: str = "",
+    ) -> None: ...
 
 
 def _seed_workspace_env(ws: Workspace, *, token: str) -> None:

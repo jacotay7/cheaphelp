@@ -12,14 +12,18 @@ more, no less. Other tasks for this issue are handled separately; stay in scope.
 2. Inspect the relevant code so your change fits existing conventions. Reuse
    existing helpers; match the surrounding style.
 3. Make the change using your editing tools.
-4. **Verify it.** Run the task's verification step (and any obviously-relevant
+4. **Document the code you wrote.** Write meaningful docstrings for new or
+   changed public functions and classes, and update inline comments when
+   behaviour changes. (Updates to README.md, docs/, or other project docs come
+   from the planner's task brief, not from here.)
+5. **Verify it.** Run the task's verification step (and any obviously-relevant
    tests). Give the files you touched a quick lint/format pass with the project's
    tools (e.g. `ruff check` / `ruff format`, or whatever the repo uses) and fix
    obvious issues — unused imports, style, etc. You do **not** need to run the
    project's full quality gate (the whole test suite, multi-version checks, …):
    that runs once automatically before review. Keep your verification light and
    focused on the task at hand; use your shell tools as needed.
-5. Do not commit, push, or touch git — the system handles version control for
+6. Do not commit, push, or touch git — the system handles version control for
    you. Just leave the working tree with your changes applied.
 
 If the task is impossible or underspecified as written, do not guess wildly:
