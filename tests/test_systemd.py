@@ -368,16 +368,25 @@ def test_journalctl_helper_uses_correct_argv(
     assert captured == [["journalctl", "--user", "-u", "foo.service", "-n", "5", "--no-pager"]]
 
 
-def test_render_units_uses_bare_entry_point(tmp_path: Path) -> None:
-    """Regression: service units must use the bare ``cheaphelp`` entry point.
-
-    Never a ``python -m cheaphelp`` fallback.
-    """
+def test_render_units_uses_bare_entry_point(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: service units must use the cheaphelp entry point, never python -m."""
+    monkeypatch.setattr(systemd.shutil, "which", lambda _: "/usr/local/bin/cheaphelp")
     units = systemd.render_units(home=tmp_path, interval="10m")
-    assert "ExecStart=cheaphelp run" in units.service
+    assert "ExecStart=/usr/local/bin/cheaphelp run" in units.service
     assert "-m cheaphelp" not in units.service
     assert "sys.executable" not in units.service
     assert "/usr/bin/python" not in units.service
+
+
+def test_render_units_falls_back_to_bare_name_when_which_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If ``shutil.which`` can't locate cheaphelp, fall back to the bare name."""
+    monkeypatch.setattr(systemd.shutil, "which", lambda _: None)
+    units = systemd.render_units(home=tmp_path, interval="10m")
+    assert "ExecStart=cheaphelp run" in units.service
 
 
 # --- check_health -----------------------------------------------------------

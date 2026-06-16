@@ -73,7 +73,9 @@ def _exec_start(*, continuous: bool, max_ticks: int, sleep: float) -> str:
     until one produces no agent turns, capped at *max_ticks*) instead of doing
     a single tick, so queued work doesn't have to wait for the next firing.
     """
-    cmd = "cheaphelp run"
+    # Use the absolute path so systemd's minimal PATH doesn't matter.
+    binary = shutil.which("cheaphelp") or "cheaphelp"
+    cmd = f"{binary} run"
     if continuous:
         cmd += f" --continuous --max-ticks {max_ticks} --sleep {sleep:g}"
     return cmd
