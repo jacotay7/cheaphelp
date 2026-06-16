@@ -104,6 +104,9 @@ def classify(issue: Issue, comments: list, config: Config) -> str:
     if labels & {lab["ready"], lab["needs_replan"]}:
         return "planner"
     if responder.needs_turn(issue, comments, config):
+        activated = lab.get("activated")
+        if activated and activated not in labels:
+            return "idle"
         return "responder"
     return "idle"
 
@@ -610,6 +613,15 @@ def _process_repo(
         return report
 
     open_numbers = {issue.number for issue in issues}
+
+    # Ensure the activation label exists on the repo.
+    gh.ensure_label(
+        repo.owner,
+        repo.name,
+        config.labels["activated"],
+        color="5319e7",
+        description="cheaphelp: human applied this label to opt the issue into the pipeline",
+    )
 
     # Reclaim disk: drop build clones for issues that have since closed. State is
     # kept. Guarded by each issue's lock so it can't race a concurrent tick.
