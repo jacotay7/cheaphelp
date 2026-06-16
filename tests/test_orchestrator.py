@@ -1074,7 +1074,13 @@ class _BudgetFakeGH:
 
     def get_issue(self, _owner: str, _name: str, number: int) -> Issue:
         return Issue(
-            number=number, title="t", body="b", state="open", labels=[self._activated], user="human", html_url="",
+            number=number,
+            title="t",
+            body="b",
+            state="open",
+            labels=[self._activated],
+            user="human",
+            html_url="",
         )
 
     def create_comment(self, _owner: str, _name: str, number: int, body: str) -> Comment:

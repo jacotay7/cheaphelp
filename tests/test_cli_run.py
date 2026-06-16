@@ -492,7 +492,13 @@ def test_cmd_run_skips_locked_issue_but_completes_tick(
     fake = _FakeGH("test-token")
     fake.issues["octocat/hello"] = [
         Issue(
-            number=7, title="t", body="", state="open", labels=[Config().labels["activated"]], user="alice", html_url="",
+            number=7,
+            title="t",
+            body="",
+            state="open",
+            labels=[Config().labels["activated"]],
+            user="alice",
+            html_url="",
         ),
     ]
 
